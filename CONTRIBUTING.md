@@ -38,8 +38,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
   `.agents/skills/` holds agent-loaded skills that assume a live firstmate home and carry `metadata.internal: true` so installers such as [skills.sh](https://skills.sh) hide them from discovery; `skills/` holds standalone, installer-facing public skills with no firstmate dependency (see the README's "Two-tier skill layout").
   Everything personal to one captain's fleet (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) is gitignored; never commit it.
   The root `.tasks.toml` is tracked `tasks-axi` config for `data/backlog.md`; compatible `tasks-axi` is the default backend for routine backlog mutations.
-  Compatible means version 0.1.1 or newer and `tasks-axi update --help` exposing `--archive-body`.
-  A local `config/backlog-backend=manual` opt-out forces hand-editing and stays gitignored.
+  Compatible means version 0.1.1 or newer, `tasks-axi update --help` exposing `--archive-body`, and `tasks-axi mv --help` exposing `[<id>...]` for atomic multi-ID moves.
+  A local `config/backlog-backend=manual` opt-out forces firstmate's routine backlog updates to hand-editing and stays gitignored; validated secondmate handoffs still delegate through `tasks-axi mv`.
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux` plus experimental `herdr`, `zellij`, `orca`, and `cmux`, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
@@ -94,18 +94,18 @@ tests/fm-fleet-sync.test.sh               # project clone refresh: safe detached
 tests/fm-fleet-snapshot-view.test.sh      # read-only fleet snapshot JSON and Markdown view coverage: stable ordering, current-state vs status-event separation, backlog parsing, scout reports, secondmate return-channel guidance, and operational directory overrides
 tests/fm-x-mode.test.sh                   # X-mode poll, inbox context round-trip, reply threading, dismiss, completion follow-up counters/caps, dry-run preview, and .env-presence activation tests
 tests/fm-tangle-guard.test.sh             # primary-checkout tangle detection, read-only remediation suppression, and spawn/brief isolation tests
-tests/fm-brief.test.sh                    # fm-brief.sh bash -n parse regression guard, clean delivery-mode scaffolds, and hard Herdr lifecycle declaration/contract tests
+tests/fm-brief.test.sh                    # fm-brief.sh bash -n and complete-help regression guards, clean delivery-mode scaffolds, default and task-specific stop conditions, budget validation, and hard Herdr lifecycle declaration/contract tests
 tests/fm-herdr-lab.test.sh                # isolated Herdr lab helper fail-closed naming, scoped calls, forbidden operations, destructive-call guard ordering, and fleet-state tripwire tests
 tests/fm-dispatch-select.test.sh          # deterministic crew-dispatch profile selection, quota-balanced tie/stale/fallback behavior, and backward-compatible first-profile selection tests
 tests/fm-spawn-batch.test.sh              # batch dispatch and FM_HOME project-path scoping tests
 tests/fm-spawn-dispatch-profile.test.sh   # concrete dispatch profile flags: active-profile backstop, harness/model/effort meta, launch templates, batch forwarding, and secondmate exemption
 tests/fm-update.test.sh                   # fast-forward-only self-update, reread, nudge, dedup, and skip-safety tests
-tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, bootstrap nudge gating, stable nudge selectors after respawn, and spawn hook tests
+tests/fm-secondmate-sync.test.sh          # local-HEAD secondmate sync, no-fetch, ignored seed-marker migration and real-dirt protection, bootstrap nudge gating, stable nudge selectors after respawn, and spawn hook tests
 tests/fm-secondmate-liveness.test.sh      # session-start secondmate agent-liveness probe and respawn sweep tests
 tests/fm-secondmate-harness.test.sh       # secondmate-vs-crewmate harness resolution, optional secondmate model/effort pins, primary-to-secondmate config inheritance, and config-push tests
 tests/fm-secondmate-lifecycle-e2e.test.sh # persistent secondmate routing, seeding, backlog handoff, spawn, recovery, teardown, and FM_HOME flow tests
 tests/fm-secondmate-safety.test.sh        # secondmate home safety, idle charter, handoff validation, teardown boundary, and child-cleanup fail-closed tests
-tests/fm-backlog-handoff.test.sh          # full item-block handoff: header plus indented and blank-separated body moves byte-exact past next-item, section-heading, and end-of-file boundaries, indented ## lines stay body not section breaks, EOF terminators preserved, and body-carrying re-runs stay idempotent
+tests/fm-backlog-handoff.test.sh          # full item-block handoff through the delegated tasks-axi mv path: header plus indented and blank-separated body moves byte-exact past next-item, section-heading, and end-of-file boundaries, indented ## lines stay body not section breaks, source terminators preserved, destination lands in tasks-axi canonical form, and body-carrying re-runs stay idempotent (skips when tasks-axi is absent or incompatible)
 tests/fm-teardown.test.sh                 # fm-teardown.sh landed-work safety and reminder checks: fork-remote allow, squash/content landings, dirty and unlanded refusals, PR-head metadata, no-pr= branch discovery, tasks-axi/manual backlog reminder, --force override, stale-vs-live worktree git index.lock recovery
 tests/fm-review-diff.test.sh              # fm-review-diff.sh authoritative review diff coverage: recorded pr_head=, fetched refs/pull/<n>/head, no-pr local branch behavior, and warning fallback
 tests/fm-pr-merge.test.sh                 # fm-pr-merge.sh records pr= and available pr_head= before merging, parses PR URLs into gh-axi number/--repo calls, defaults to squash, preserves explicit merge methods, rejects malformed URLs and repo overrides, and propagates real merge failures
