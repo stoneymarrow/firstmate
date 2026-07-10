@@ -822,6 +822,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # Compare against PROJ_ABS_REAL (physical), not PROJ_ABS: a symlinked project
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
+  invalid_candidate=
+  invalid_candidate_polls=0
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$T" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
@@ -830,6 +832,22 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
         WT="$p"
         break
       fi
+      # A backend can briefly report an intermediate non-worktree cwd while
+      # treehouse is settling. Ignore one sample, but hand a stable invalid
+      # path to the isolation validator instead of misreporting a timeout.
+      if [ "$(real_path_or_raw "$p")" = "$invalid_candidate" ]; then
+        invalid_candidate_polls=$((invalid_candidate_polls + 1))
+      else
+        invalid_candidate=$(real_path_or_raw "$p")
+        invalid_candidate_polls=1
+      fi
+      if [ "$invalid_candidate_polls" -ge 2 ]; then
+        WT="$p"
+        break
+      fi
+    else
+      invalid_candidate=
+      invalid_candidate_polls=0
     fi
     sleep 1
   done
