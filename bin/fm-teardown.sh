@@ -137,6 +137,15 @@ meta_value() {
   fm_meta_get "$meta" "$key"
 }
 
+remove_task_state_files() {
+  local state=$1 id=$2 lock status=0
+  lock="$state/.$id.meta.lock"
+  fm_lock_acquire_wait "$lock"
+  rm -f "$state/$id.status" "$state/$id.turn-ended" "$state/$id.check.sh" "$state/$id.meta" "$state/$id.pi-ext.ts" "$state/$id.grok-turnend-token" || status=$?
+  fm_lock_release "$lock"
+  return "$status"
+}
+
 require_orca_worktree_id() {
   local meta=$1 id
   id=$(meta_value "$meta" orca_worktree_id)
@@ -916,7 +925,7 @@ cleanup_firstmate_home_children() {
       fi
     fi
     remove_grok_turnend_auth "$sub_state" "$child_id"
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.check.sh" "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.grok-turnend-token"
+    remove_task_state_files "$sub_state" "$child_id"
   done
 }
 
@@ -1038,7 +1047,7 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token"
+remove_task_state_files "$STATE" "$ID"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
