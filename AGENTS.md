@@ -410,6 +410,7 @@ Write the brief per section 11.
 ### Spawn
 
 Load `harness-adapters` before spawning or recovering any direct report so trust dialogs, verified adapters, and harness-specific behavior are handled correctly.
+Every ordinary crewmate and scout spawn carries a human-readable task label, and firstmate refreshes it on meaningful lifecycle phase changes; `bin/fm-spawn.sh --help` and `bin/fm-label.sh --help` own the exact mechanics.
 
 ```sh
 bin/fm-spawn.sh <id> projects/<repo>             # uses the active crewmate harness only when no crew-dispatch.json is active

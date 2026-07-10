@@ -23,7 +23,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates, with optional Herdr display labels |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates with standard lifecycle labels |
 | `fm-label.sh`            | Update a live Herdr task's human-readable display label; other backends are a no-op  |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |

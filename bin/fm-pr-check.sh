@@ -47,11 +47,13 @@ if [ -f "$META" ]; then
 fi
 
 fm_lock_acquire_wait "$META_LOCK"
+GENERATION_MATCHED=0
 if [ "$LOOKUP_META_EXISTS" = 1 ] && [ -f "$META" ]; then
   LOCKED_WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   LOCKED_WINDOW=$(grep '^window=' "$META" | tail -1 | cut -d= -f2- || true)
   LOCKED_TERMINAL=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ "$LOCKED_WT" = "$LOOKUP_WT" ] && [ "$LOCKED_WINDOW" = "$LOOKUP_WINDOW" ] && [ "$LOCKED_TERMINAL" = "$LOOKUP_TERMINAL" ]; then
+    GENERATION_MATCHED=1
     if ! grep -qxF "pr=$URL" "$META"; then
       echo "pr=$URL" >> "$META"
     fi
@@ -61,10 +63,16 @@ if [ "$LOOKUP_META_EXISTS" = 1 ] && [ -f "$META" ]; then
   fi
 fi
 
-cat > "$STATE/$ID.check.sh" <<EOF
+if [ "$GENERATION_MATCHED" = 1 ]; then
+  cat > "$STATE/$ID.check.sh" <<EOF
 state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] && echo "merged"
 EOF
+  fm_lock_release "$META_LOCK"
+  META_LOCK=
+  echo "armed: state/$ID.check.sh polls $URL"
+  exit 0
+fi
 fm_lock_release "$META_LOCK"
 META_LOCK=
-echo "armed: state/$ID.check.sh polls $URL"
+echo "not armed: task $ID metadata changed during PR lookup; preserved the current generation and any existing poll" >&2
