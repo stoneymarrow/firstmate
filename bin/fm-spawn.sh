@@ -825,8 +825,11 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$T" || true)
     if [ -n "$p" ] && [ "$(real_path_or_raw "$p")" != "$PROJ_ABS_REAL" ]; then
-      WT="$p"
-      break
+      p_top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null || true)
+      if [ -n "$p_top" ] && [ "$(real_path_or_raw "$p")" = "$(real_path_or_raw "$p_top")" ]; then
+        WT="$p"
+        break
+      fi
     fi
     sleep 1
   done

@@ -895,6 +895,28 @@ test_spawn_symlinked_project_prefix_avoids_false_refusal() {
   pass "fm-spawn.sh: a project reached through a symlinked prefix (e.g. macOS /tmp -> /private/tmp) does not trip the isolation guard's false refusal"
 }
 
+test_spawn_ignores_transient_non_worktree_cwd() {
+  local proj wt data id state config fb log out rc
+  proj="$TMP_ROOT/transient-cwd-project"; wt="$TMP_ROOT/transient-cwd-wt"; data="$TMP_ROOT/transient-cwd-data"
+  id="spawntransient1"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  fb=$(make_spawn_symlink_fakebin "$TMP_ROOT/transient-cwd-fake" / "$wt")
+  mkdir -p "$data/$id"
+  printf 'test brief content\n' > "$data/$id/brief.md"
+  state="$TMP_ROOT/transient-cwd-state"; config="$TMP_ROOT/transient-cwd-config"
+  mkdir -p "$state" "$config"
+  log="$TMP_ROOT/transient-cwd-spawn.log"
+
+  out=$(run_spawn_case "$ROOT" "$fb" "$log" "$state" "$data" "$config" "$proj" -- "$id" "$proj" claude 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "fm-spawn.sh should ignore a transient non-worktree cwd while treehouse get is settling"$'\n'"$out"
+  assert_contains "$out" "worktree=$wt" \
+    "fm-spawn.sh did not continue polling through a transient non-worktree cwd"
+
+  rm -rf "/tmp/fm-$id"
+  pass "fm-spawn.sh: transient non-worktree cwd is ignored until treehouse reports the leased worktree"
+}
+
 # --- old vs new: fm-teardown.sh ----------------------------------------------
 
 make_teardown_fakebin() {  # <dir> -> echoes fakebin dir; logs tmux+treehouse calls
@@ -1107,6 +1129,7 @@ test_send_conformance_old_vs_new
 test_peek_conformance_old_vs_new
 test_spawn_conformance_old_vs_new
 test_spawn_symlinked_project_prefix_avoids_false_refusal
+test_spawn_ignores_transient_non_worktree_cwd
 test_teardown_conformance_old_vs_new
 test_spawn_refuses_unknown_backend_flag
 test_spawn_refuses_codex_app_backend_flag
