@@ -24,6 +24,19 @@ test_script_parses() {
   pass "fm-brief.sh: bash -n succeeds"
 }
 
+test_help_includes_complete_header() {
+  local help status=0
+  help=$("$ROOT/bin/fm-brief.sh" --help 2>&1) || status=$?
+  expect_code 0 "$status" "fm-brief.sh --help"
+  assert_contains "$help" "[--budget '<text>']" \
+    "fm-brief.sh --help omitted --budget from usage"
+  assert_contains "$help" "--budget '<text>' adds a task-specific hard stop" \
+    "fm-brief.sh --help omitted --budget documentation"
+  assert_contains "$help" "Refuses to overwrite an existing brief." \
+    "fm-brief.sh --help truncated the final refusal warning"
+  pass "fm-brief.sh: --help includes the complete header"
+}
+
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
 # exercised. A project absent from the registry defaults to no-mistakes.
 write_registry() {
@@ -269,6 +282,7 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_script_parses
+test_help_includes_complete_header
 test_ship_modes_generate_clean_briefs
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
