@@ -10,11 +10,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 "$FM_ROOT/bin/fm-guard.sh" || true
 ID=$1
 URL=$2
 
 META="$STATE/$ID.meta"
+META_LOCK="$STATE/.$ID.meta.lock"
+pr_check_cleanup() {
+  local status=$?
+  set +e
+  [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"
+  return "$status"
+}
+trap pr_check_cleanup EXIT
+
+[ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
+fm_lock_acquire_wait "$META_LOCK"
 if [ -f "$META" ]; then
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   PR_HEAD=
@@ -37,4 +50,6 @@ cat > "$STATE/$ID.check.sh" <<EOF
 state=\$(gh pr view "$URL" --json state -q .state 2>/dev/null)
 [ "\$state" = "MERGED" ] && echo "merged"
 EOF
+fm_lock_release "$META_LOCK"
+META_LOCK=
 echo "armed: state/$ID.check.sh polls $URL"
