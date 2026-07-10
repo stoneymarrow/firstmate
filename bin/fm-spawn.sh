@@ -416,8 +416,18 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   exit "$rc"
 fi
 ID=${POS[0]}
+# Serialize against concurrent metadata writers for this task id. The state dir
+# may not exist yet (very first spawn in a fresh home), so create it before the
+# lock; when it cannot be a directory at all (an unusable state path), skip the
+# lock and let the loud `mkdir -p "$STATE"` below fail at the meaningful point,
+# instead of spinning the lock wait against a path that can never hold a lock.
 SPAWN_META_LOCK="$STATE/.$ID.meta.lock"
-fm_task_lock_acquire_wait "$SPAWN_META_LOCK"
+mkdir -p "$STATE" 2>/dev/null || true
+if [ -d "$STATE" ]; then
+  fm_task_lock_acquire_wait "$SPAWN_META_LOCK"
+else
+  SPAWN_META_LOCK=
+fi
 SPAWN_GENERATION=$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')
 if [ "${#SPAWN_GENERATION}" -ne 32 ] || [[ "$SPAWN_GENERATION" == *[!0-9a-f]* ]]; then
   echo "error: could not generate a unique spawn generation for $ID" >&2
