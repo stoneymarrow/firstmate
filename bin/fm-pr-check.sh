@@ -25,16 +25,10 @@ LOOKUP_WT=
 LOOKUP_WINDOW=
 LOOKUP_TERMINAL=
 PR_HEAD=
-pr_check_cleanup() {
-  local status=$?
-  set +e
-  [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"
-  return "$status"
-}
-trap pr_check_cleanup EXIT
+trap 'status=$?; set +e; [ -z "$META_LOCK" ] || fm_lock_release "$META_LOCK"; exit "$status"' EXIT
 
 [ -d "$STATE" ] || { echo "error: state dir $STATE is missing" >&2; exit 1; }
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 if [ -f "$META" ]; then
   LOOKUP_META_EXISTS=1
   LOOKUP_GENERATION_COUNT=$(grep -c '^generation=' "$META" || true)
@@ -52,7 +46,7 @@ if [ "$LOOKUP_META_EXISTS" = 1 ] && [ -n "$LOOKUP_WT" ] && [ -d "$LOOKUP_WT" ]; 
   fi
 fi
 
-fm_lock_acquire_wait "$META_LOCK"
+fm_task_lock_acquire_wait "$META_LOCK"
 GENERATION_MATCHED=0
 if [ "$LOOKUP_META_EXISTS" = 1 ] && [ -f "$META" ]; then
   LOCKED_GENERATION_COUNT=$(grep -c '^generation=' "$META" || true)
@@ -87,5 +81,9 @@ EOF
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK=
+if [ "$LOOKUP_META_EXISTS" = 0 ]; then
+  echo "not armed: no metadata for task $ID; no PR poll was created" >&2
+  exit 1
+fi
 echo "not armed: task $ID metadata changed during PR lookup; preserved the current generation and any existing poll" >&2
 exit 1
