@@ -299,14 +299,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # external pause or checks-green PR merge monitoring.
 # Re-surface it once every PAUSE_RESURFACE_SECS for a recheck so it cannot rot
 # invisibly.
-# Called on any stale poll once the crew is known idle (first sight, after
-# crew_absorb_class; and repeat sights, gated by the .paused-<key> flag), so
-# it must be cheap: it NEVER re-reads the crew state. The re-surface age is anchored
-# on the wait's own STATUS-FILE mtime, not a per-hash marker, so a churny idle pane
-# (a ticking clock, a token counter) cannot keep resetting the cadence the way a
-# hash-tied timer would. A .paused-resurfaced-<key> throttle marker records the last
+# Called after crew_absorb_class authoritatively confirms the idle state.
+# A declared pause is aged from its status-file mtime, while merge monitoring is
+# aged from the idle marker's first sighting because validation may postdate the
+# latest status. A .paused-resurfaced-<key> throttle marker records the last
 # re-surface epoch so, once past the window, it fires once per window rather than
-# every poll. Advances the stale suppressor to <hash> and flags the key paused.
+# every poll. Advances the stale suppressor to <hash> and records the idle class.
 handle_idle_stale() {  # <window> <task> <hash> <paused|merge-wait>
   local win=$1 task=$2 h=$3 class=$4 key marker marked statusf mtime age rf rf_age reason detail
   key=$(printf '%s' "$win" | tr ':/.' '___')
@@ -317,9 +315,14 @@ handle_idle_stale() {  # <window> <task> <hash> <paused|merge-wait>
     printf '%s\n' "$class" > "$marker"
   fi
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
-  statusf="$STATE/$task.status"
-  mtime=$(stat_mtime "$statusf")
-  case "$mtime" in ''|*[!0-9]*) mtime=$(stat_mtime "$marker") ;; esac
+  case "$class" in
+    paused)
+      statusf="$STATE/$task.status"
+      mtime=$(stat_mtime "$statusf")
+      case "$mtime" in ''|*[!0-9]*) mtime=$(stat_mtime "$marker") ;; esac
+      ;;
+    merge-wait) mtime=$(stat_mtime "$marker") ;;
+  esac
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
@@ -361,22 +364,7 @@ idle_marker_class() {  # <window-key>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key recheck_file class marked
-  key=${win//:/_}
-  key=${key//\//_}
-  key=${key//./_}
-  recheck_file="$STATE/.paused-rechecked-$key"
-  marked=$(idle_marker_class "$key")
-  if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    printf '%s' "$marked"
-    return
-  fi
-  class=$(crew_absorb_class "$task")
-  case "$class" in
-    paused|merge-wait) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  crew_absorb_class "$2"
 }
 
 surface_nonterminal_stale() {  # <window> <hash>
