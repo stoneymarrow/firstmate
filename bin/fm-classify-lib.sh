@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# tests, declared-external-wait vocabulary, and the working/idle-wait
+# classification used in no-verb signal and stale-pane triage.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -17,9 +17,9 @@
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# paused, monitoring a checks-green PR, or none of those. Callers run it ONLY on
+# no-verb signal handling and first sighting of a stale hash, never on every wake,
+# so the per-wake triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -51,11 +51,12 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
+# Bounded re-surface cadence for a legitimate idle wait. Far longer than the wedge
 # threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# nagged like a wedge, yet finite so it cannot rot invisibly - it re-surfaces once
+# for a recheck every window. One hour by default; both consumers read
+# FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner, although
+# the away-mode daemon currently applies it only to declared pauses.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
@@ -236,7 +237,7 @@ signal_reason_is_actionable() {  # <file> ...
 #             is monitoring the PR for merge/close;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
+# One fm-crew-state.sh read serves every absorb class at once. Reading the state
 # authoritatively is what keeps active-work precedence: a crew that appended
 # paused: but then STARTED a run reports working, while a terminal run no longer
 # masks the trailing pause declaration.
@@ -276,7 +277,7 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# run. See crew_absorb_class for the exact decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
