@@ -308,13 +308,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # re-surface epoch so, once past the window, it fires once per window rather than
 # every poll. Advances the stale suppressor to <hash> and flags the key paused.
 handle_idle_stale() {  # <window> <task> <hash> <paused|merge-wait>
-  local win=$1 task=$2 h=$3 class=$4 key statusf mtime age rf rf_age reason detail
+  local win=$1 task=$2 h=$3 class=$4 key marker marked statusf mtime age rf rf_age reason detail
   key=$(printf '%s' "$win" | tr ':/.' '___')
   printf '%s' "$h" > "$STATE/.stale-$key"
-  printf '%s\n' "$class" > "$STATE/.paused-$key"
+  marker="$STATE/.paused-$key"
+  marked=$(cat "$marker" 2>/dev/null || true)
+  if [ "$marked" != "$class" ]; then
+    printf '%s\n' "$class" > "$marker"
+  fi
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
+  case "$mtime" in ''|*[!0-9]*) mtime=$(stat_mtime "$marker") ;; esac
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   age=$(( $(date +%s) - mtime ))
   rf="$STATE/.paused-resurfaced-$key"
@@ -356,11 +361,10 @@ idle_marker_class() {  # <window-key>
 }
 
 pause_state_class() {  # <window> <task>
-  local win=$1 task=$2 key last recheck_file class marked
+  local win=$1 task=$2 key recheck_file class marked
   key=${win//:/_}
   key=${key//\//_}
   key=${key//./_}
-  last=$(last_status_line "$STATE/$task.status")
   recheck_file="$STATE/.paused-rechecked-$key"
   marked=$(idle_marker_class "$key")
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
