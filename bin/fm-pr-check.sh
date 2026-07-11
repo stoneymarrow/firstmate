@@ -3,6 +3,9 @@
 # state/<id>.meta when available, then arms the watcher's merge poll by writing
 # state/<id>.check.sh, which prints one line iff the PR is merged (the watcher's
 # check contract: output = wake firstmate, silence = keep sleeping).
+# The GitHub lookup runs without the task lock, then the helper rechecks the
+# spawn generation before writing; a same-id replacement preserves its meta and
+# existing poll, and this invocation exits non-zero without arming stale state.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
