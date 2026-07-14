@@ -237,8 +237,8 @@ test_spawned_firstmate_scout_primary_hooks_are_inert() {
   git -C "$project" worktree add -q --detach "$scout"
   # The test runs before this branch is committed, so make the spawned checkout
   # carry the current tracked hook implementation just as it will after ship.
-  cp "$ROOT/bin/fm-primary-identity.sh" "$scout/bin/fm-primary-identity.sh"
-  cp "$ROOT/bin/fm-turnend-guard.sh" "$scout/bin/fm-turnend-guard.sh"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$scout/bin/fm-primary-identity.sh"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-turnend-guard.sh" "$scout/bin/fm-turnend-guard.sh"
   chmod +x "$scout/bin/fm-primary-identity.sh" "$scout/bin/fm-turnend-guard.sh"
   fakebin=$(make_spawn_fakebin "$TMP_ROOT/firstmate-scout-fake")
 
@@ -248,7 +248,7 @@ test_spawned_firstmate_scout_primary_hooks_are_inert() {
   assert_grep 'kind=scout' "$home/state/$id.meta" "spawned Firstmate scout did not record kind=scout"
 
   : > "$home/state/in-flight.meta"
-  hook_out=$(printf '{"stop_hook_active":false}' | FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" bash "$scout/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  hook_out=$(printf '{"stop_hook_active":false}' | FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" bash "$scout/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 0 "$status" "spawned Firstmate scout hook must stay inert"
   [ -z "$hook_out" ] || fail "spawned Firstmate scout hook produced a primary alarm: $hook_out"
   pass "fm-spawn: a real Firstmate-on-itself scout cannot activate primary hooks"
@@ -259,15 +259,25 @@ test_worktree_refuses_fleet_primary_entrypoints() {
   home="$TMP_ROOT/identity-refusal-home"
   mkdir -p "$home"
   for script in \
-    fm-session-start.sh fm-bootstrap.sh fm-spawn.sh fm-pr-merge.sh fm-merge-local.sh \
-    fm-fleet-sync.sh fm-config-push.sh fm-send.sh fm-teardown.sh fm-watch.sh \
-    fm-watch-arm.sh fm-wake-drain.sh fm-supervise-daemon.sh; do
-    out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/$script" 2>&1)
+    fm-session-start.sh fm-lock.sh fm-bootstrap.sh fm-brief.sh fm-spawn.sh \
+    fm-pr-check.sh fm-pr-merge.sh fm-promote.sh fm-merge-local.sh fm-home-seed.sh \
+    fm-backlog-handoff.sh fm-fleet-sync.sh fm-config-push.sh fm-update.sh \
+    fm-send.sh fm-teardown.sh fm-watch.sh fm-watch-arm.sh fm-watch-checkpoint.sh \
+    fm-wake-drain.sh fm-supervise-daemon.sh fm-afk-launch.sh fm-afk-start.sh \
+    fm-x-dismiss.sh fm-x-followup.sh fm-x-link.sh fm-x-poll.sh fm-x-reply.sh; do
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$FM_TEST_SOURCE_ROOT/bin/$script" 2>&1)
     status=$?
     expect_code 3 "$status" "$script must refuse fleet-primary behavior from a worktree"
     assert_contains "$out" "not the active FM_HOME" "$script did not explain its primary-identity refusal"
   done
-  pass "fm-primary-identity: worktree rejects bootstrap, supervision, spawn, merge, and fleet entrypoints"
+  pass "fm-primary-identity: worktree rejects every fleet-primary mutating entrypoint"
+}
+
+test_documented_primary_launch_sets_identity() {
+  assert_grep 'FM_HOME="$PWD" claude' "$FM_TEST_SOURCE_ROOT/README.md" "Claude primary launch does not set FM_HOME"
+  assert_grep 'FM_HOME="$PWD" grok --trust' "$FM_TEST_SOURCE_ROOT/README.md" "Grok primary launch does not set FM_HOME"
+  assert_grep 'FM_HOME="$PWD" pi' "$FM_TEST_SOURCE_ROOT/README.md" "Pi primary launch does not set FM_HOME"
+  pass "README primary launch commands establish explicit checkout identity"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -364,4 +374,5 @@ test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawned_firstmate_scout_primary_hooks_are_inert
 test_worktree_refuses_fleet_primary_entrypoints
+test_documented_primary_launch_sets_identity
 test_spawn_tmux_window_construction

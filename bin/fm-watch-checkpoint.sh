@@ -4,6 +4,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+"$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
 
 usage() {

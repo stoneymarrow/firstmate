@@ -33,16 +33,6 @@ FM_TEST_LIB_SOURCED=1
 # the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
-# Fleet-script tests intentionally point tracked code at disposable homes. They
-# are not primary adapter sessions, so they opt out of that production-only
-# identity assertion. Identity-specific tests clear this variable explicitly.
-export FM_PRIMARY_IDENTITY_BYPASS=1
-
-# Resolve the repo root from this library's own location. Consumed by sourcing
-# test files, not by this library, so it reads as "unused" here.
-# shellcheck disable=SC2034
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 # --- reporters --------------------------------------------------------------
 
 fail() {
@@ -69,6 +59,22 @@ fm_test_cleanup() {
     [ -n "$d" ] && rm -rf "$d"
   done
 }
+
+# shellcheck disable=SC2034
+FM_TEST_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034
+ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-root.XXXXXX") || exit 1
+FM_TEST_CLEANUP_DIRS+=("$ROOT")
+trap fm_test_cleanup EXIT
+(
+  cd "$FM_TEST_SOURCE_ROOT" || exit 1
+  git ls-files -z | tar --null -T - -cf -
+) | tar -xf - -C "$ROOT" || exit 1
+git -C "$ROOT" init -q -b main
+git -C "$ROOT" add .
+git -C "$ROOT" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm fixture
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ROOT/bin/fm-primary-identity.sh"
+chmod +x "$ROOT/bin/fm-primary-identity.sh"
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root

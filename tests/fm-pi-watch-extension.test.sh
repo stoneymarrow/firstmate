@@ -10,9 +10,19 @@ unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OV
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 
+install_primary_identity_fixture() {
+  local repo=$1
+  mkdir -p "$repo/bin"
+  git -C "$repo" rev-parse --show-toplevel >/dev/null 2>&1 || git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$repo/bin/fm-primary-identity.sh"
+  chmod +x "$repo/bin/fm-primary-identity.sh"
+}
+
 install_pi_watch_extension_fixture() {
   local repo=$1
   mkdir -p "$repo/.pi/extensions" "$repo/node_modules/typebox"
+  install_primary_identity_fixture "$repo"
   cp "$EXT" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/node_modules/typebox/package.json" <<'JSON'
 {"name":"typebox","type":"module","exports":"./index.js"}
@@ -39,6 +49,8 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" ".pi-watch-extension-loaded" "tracked extension missing loaded marker"
   assert_contains "$text" 'createHash("sha256").update(readFileSync(extensionFile)).digest("hex")' "tracked extension does not self-hash its own content for extensionVersion"
   assert_contains "$text" 'fileURLToPath(import.meta.url)' "tracked extension does not self-locate via import.meta.url"
+  assert_contains "$text" "fm-primary-identity.sh" "tracked extension does not use the canonical active-home identity guard"
+  assert_contains "$text" "if (!primaryIdentity) return" "tracked extension does not stop before primary registration and writes"
   assert_contains "$text" "sessionOwnsLock" "tracked extension missing session lock ownership check"
   assert_contains "$text" 'type LockOwnership = "owned" | "missing" | "other"' "tracked extension does not distinguish missing lock from another owner"
   assert_contains "$text" "readFileSync(\`\${state}/.lock\`" "tracked extension does not read the effective session lock"
@@ -59,6 +71,41 @@ test_tracked_extension_present_and_self_hashing() {
   assert_contains "$text" 'process.once("exit", cleanupOnProcessExit)' "tracked extension lacks clean-process-exit cleanup"
   assert_not_contains "$text" "[ -f config/x-mode.env ]" "tracked extension kept a repo-relative x-mode config path"
   pass "Pi primary watcher extension is tracked, self-hashing, and self-locating"
+}
+
+test_pi_extensions_are_inert_outside_active_home() {
+  local repo home watch turnend out status
+  repo="$TMP_ROOT/pi-inert-root"
+  home="$TMP_ROOT/pi-inert-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  watch="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  turnend="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$turnend"
+  out=$(WATCH="$watch" TURNEND="$turnend" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" node --input-type=module 2>&1 <<'EOF'
+import { existsSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let registrations = 0;
+const pi = {
+  on() { registrations += 1; },
+  registerCommand() { registrations += 1; },
+  registerTool() { registrations += 1; },
+  sendUserMessage: async () => {},
+};
+const watch = await import(pathToFileURL(process.env.WATCH).href);
+const turnend = await import(pathToFileURL(process.env.TURNEND).href);
+watch.default(pi);
+turnend.default(pi);
+if (registrations !== 0) throw new Error(`inactive extensions registered ${registrations} handlers`);
+if (existsSync(`${process.env.FM_STATE_OVERRIDE}/.pi-watch-extension-loaded`)) throw new Error("inactive watch extension wrote its marker");
+if (existsSync(`${process.env.FM_STATE_OVERRIDE}/.pi-turnend-extension-loaded`)) throw new Error("inactive turn-end extension wrote its marker");
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extensions must stay inert when their checkout is not FM_HOME"
+  [ -z "$out" ] || fail "Pi inactive-extension test printed output: $out"
+  pass "Pi primary extensions register nothing and write nothing outside the active home"
 }
 
 test_spawn_template_mentions_pi_watch_placeholder() {
@@ -84,7 +131,7 @@ test_pi_extension_reports_external_healthy_watcher() {
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -101,7 +148,7 @@ const pi = {
     prompt = message;
   },
 };
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!handler) {
@@ -158,7 +205,7 @@ test_pi_tool_returns_agent_tool_result() {
 exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" node --input-type=module 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -171,7 +218,7 @@ const pi = {
   },
   sendUserMessage: async () => {},
 };
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 if (!tool) throw new Error("Pi watch tool was not registered");
@@ -204,7 +251,7 @@ test_pi_process_exit_cleanup_listener_lifecycle() {
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : > "$repo/bin/fm-watch-arm.sh"
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
@@ -250,7 +297,7 @@ printf '%s\n' "$$" > "$FM_CHILD_PID_FILE"
 while :; do sleep 1; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CLEANUP_LOG="$cleanup_log" FM_CHILD_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_CLEANUP_LOG="$cleanup_log" FM_CHILD_PID_FILE="$pid_file" node --input-type=module 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -263,7 +310,7 @@ const pi = {
   },
   sendUserMessage: async () => {},
 };
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
@@ -300,7 +347,7 @@ test_opencode_primary_watch_plugin_static_wiring() {
   assert_contains "$text" "fm-watch-arm.sh" "OpenCode plugin does not spawn the watcher arm"
   assert_contains "$text" "promptAsync" "OpenCode plugin does not wake with promptAsync"
   assert_contains "$text" "fm-primary-identity.sh" "OpenCode plugin does not use the canonical active-home identity guard"
-  assert_contains "$text" "FM_PRIMARY_IDENTITY_BYPASS" "OpenCode plugin does not preserve the hermetic identity-test escape hatch"
+  assert_not_contains "$text" "FM_PRIMARY_IDENTITY_BYPASS" "OpenCode plugin kept a production-reachable identity bypass"
   assert_contains "$text" "sessionOwnsLock" "OpenCode plugin does not gate arm attempts on the session lock"
   assert_contains "$text" 'fm-watch-arm.sh" --restart' "OpenCode plugin does not restart into its own watcher child"
   assert_contains "$text" 'setArmStatus("external")' "OpenCode plugin still treats an external healthy watcher as armed"
@@ -314,8 +361,7 @@ test_opencode_primary_watch_plugin_uses_effective_state_home() {
   home="$TMP_ROOT/opencode-effective-state-home"
   log="$TMP_ROOT/opencode-effective-state.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -323,7 +369,7 @@ printf 'home=%s root=%s\n' "${FM_HOME:-}" "${FM_ROOT_OVERRIDE:-}" >> "${FM_ARM_L
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -334,7 +380,7 @@ const hooks = await mod.FmPrimaryWatchArm({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -352,9 +398,9 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
+  expect_code 0 "$status" "OpenCode watch plugin must preserve explicit FM_HOME while using overridden state"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
-  pass "OpenCode watcher plugin uses the effective FM_HOME state"
+  pass "OpenCode watcher plugin preserves explicit FM_HOME and uses overridden state"
 }
 
 test_opencode_primary_watch_plugin_sources_effective_config() {
@@ -364,8 +410,7 @@ test_opencode_primary_watch_plugin_sources_effective_config() {
   home="$TMP_ROOT/opencode-effective-config-home"
   log="$TMP_ROOT/opencode-effective-config.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   printf 'export FM_POLL=7\n' > "$home/config/x-mode.env"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -373,7 +418,7 @@ printf 'poll=%s\n' "${FM_POLL:-missing}" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -384,7 +429,7 @@ const hooks = await mod.FmPrimaryWatchArm({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -413,8 +458,7 @@ test_opencode_primary_watch_plugin_requires_session_lock() {
   home="$TMP_ROOT/opencode-lock-home"
   log="$TMP_ROOT/opencode-lock.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -422,7 +466,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -434,14 +478,14 @@ const hooks = await mod.FmPrimaryWatchArm({
   worktree: process.env.WORKTREE,
 });
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, "999999\n");
 await hooks.event(event);
 await new Promise((resolve) => setTimeout(resolve, 120));
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
 }
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await hooks.event(event);
 for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -467,7 +511,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope() {
   log="$TMP_ROOT/opencode-coordinator.log"
   fm_git_worktree "$base" "$repo" fm/opencode-coordinator
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -475,7 +519,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -486,7 +530,7 @@ await mod.FmPrimaryWatchArm({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", client);
 await new Promise((resolve) => setTimeout(resolve, 120));
 if (status !== "not-primary") {
@@ -512,8 +556,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake() {
   home="$TMP_ROOT/opencode-rearm-home"
   log="$TMP_ROOT/opencode-rearm.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -521,7 +564,7 @@ printf 'arm\n' >> "${FM_ARM_LOG:?}"
 printf 'signal: synthetic wake\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -548,7 +591,7 @@ const hooks = await mod.FmPrimaryWatchArm({
   worktree: process.env.WORKTREE,
 });
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await hooks.event(event);
 await waitForPrompts(1);
 await hooks.event(event);
@@ -570,8 +613,7 @@ test_opencode_watch_arm_coordinates_with_turnend_guard() {
   log="$TMP_ROOT/opencode-coordinate-arm.log"
   guard_log="$TMP_ROOT/opencode-coordinate-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -585,7 +627,7 @@ printf 'guard should not run\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
 import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -609,7 +651,7 @@ const guardHooks = await guardMod.FmPrimaryTurnendGuard({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 for (let i = 0; i < 50 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -643,8 +685,7 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
   log="$TMP_ROOT/opencode-external-healthy-arm.log"
   guard_log="$TMP_ROOT/opencode-external-healthy-guard.log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
-  git init -q "$repo"
-  : > "$repo/AGENTS.md"
+  install_primary_identity_fixture "$repo"
   : > "$home/state/task.meta"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
@@ -658,7 +699,7 @@ printf 'guard ran after external healthy watcher\n' >&2
 exit 2
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh" "$repo/bin/fm-turnend-guard.sh"
-  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
+  out=$(ARM_PLUGIN="$arm_plugin" GUARD_PLUGIN="$guard_plugin" WORKTREE="$repo" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_ARM_LOG="$log" FM_GUARD_LOG="$guard_log" node 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -682,7 +723,7 @@ const guardHooks = await guardMod.FmPrimaryTurnendGuard({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_STATE_OVERRIDE}/.lock`, `${process.pid}\n`);
 await guardHooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
 for (let i = 0; i < 50 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -712,6 +753,7 @@ EOF
 }
 
 test_tracked_extension_present_and_self_hashing
+test_pi_extensions_are_inert_outside_active_home
 test_spawn_template_mentions_pi_watch_placeholder
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result

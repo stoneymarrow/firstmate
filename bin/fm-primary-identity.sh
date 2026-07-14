@@ -75,12 +75,6 @@ inactive_exit() {
   exit 1
 }
 
-# Test-only escape hatch. Production sessions must carry an explicit FM_HOME so
-# a standalone pool clone can never infer primary authority from its own path.
-if [ "${FM_PRIMARY_IDENTITY_BYPASS:-}" = 1 ]; then
-  exit 0
-fi
-
 [ -n "${FM_HOME:-}" ] || inactive_exit
 
 CODE_ROOT=$(CDPATH='' cd -- "$CODE_ROOT" 2>/dev/null && pwd -P) || inactive_exit

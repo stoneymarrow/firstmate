@@ -12,10 +12,11 @@ type LockOwnership = "owned" | "missing" | "other";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = process.env.FM_HOME || "";
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+const primaryIdentity = spawnSync(`${root}/bin/fm-primary-identity.sh`, ["--code-root", root], { stdio: "ignore" }).status === 0;
 
 function parentPid(pid: string): string {
   const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
@@ -100,6 +101,8 @@ function runCdCheck(command: string): Promise<{ code: number; stderr: string }> 
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!primaryIdentity) return;
+
   pi.on?.("session_start", () => {
     markLoaded();
   });

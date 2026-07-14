@@ -92,7 +92,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
-  cp "$ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
@@ -179,7 +179,7 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home=${3:-}
   [ -n "$home" ] || home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_PRIMARY_IDENTITY_BYPASS= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -215,22 +215,22 @@ test_primary_identity_shape_matrix() {
   pool=$(make_pool_clone_dir "$primary" "$TMP_ROOT/identity-pool")
   secondmate=$(make_secondmate_dir "$TMP_ROOT/identity-secondmate")
 
-  FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$primary/bin/fm-primary-identity.sh" --code-root "$primary"
+  FM_HOME="$primary" "$primary/bin/fm-primary-identity.sh" --code-root "$primary"
   status=$?
   expect_code 0 "$status" "actual primary must satisfy the active-home identity"
 
-  if FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$linked/bin/fm-primary-identity.sh" --code-root "$linked"; then
+  if FM_HOME="$primary" "$linked/bin/fm-primary-identity.sh" --code-root "$linked"; then
     fail "linked worktree must not satisfy the active-home identity"
   fi
 
   gd=$(git -C "$pool" rev-parse --git-dir)
   gcd=$(git -C "$pool" rev-parse --git-common-dir)
   [ "$gd" = "$gcd" ] || fail "pool fixture must be a standalone clone (git-dir == git-common-dir)"
-  if FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$pool/bin/fm-primary-identity.sh" --code-root "$pool"; then
+  if FM_HOME="$primary" "$pool/bin/fm-primary-identity.sh" --code-root "$pool"; then
     fail "standalone pool clone must not satisfy the active-home identity"
   fi
 
-  FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$secondmate" "$secondmate/bin/fm-primary-identity.sh" --code-root "$secondmate"
+  FM_HOME="$secondmate" "$secondmate/bin/fm-primary-identity.sh" --code-root "$secondmate"
   status=$?
   expect_code 0 "$status" "secondmate home must satisfy its own active-home identity"
   pass "fm-primary-identity: actual primary and secondmate pass; linked worktree and standalone pool clone stay inert"
@@ -322,16 +322,14 @@ test_hook_blocks_when_unhealthy_in_primary() {
   pass "fm-turnend-guard: blocks with the exact required reason in the primary when unhealthy"
 }
 
-test_hook_blocks_from_fm_home_state() {
-  local dir home out status
-  dir=$(make_primary_dir "$TMP_ROOT/hook-fm-home")
-  home="$TMP_ROOT/hook-fm-home-op"
-  mkdir -p "$home/state"
-  : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
-  expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
-  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
-  pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
+test_hook_rejects_root_override_as_identity() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-root-override")
+  : > "$dir/state/task1.meta"
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME= FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$dir/state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "an inherited root override must not establish primary identity"
+  [ -z "$out" ] || fail "root override activated the turn-end guard without explicit FM_HOME: $out"
+  pass "fm-turnend-guard: an empty FM_HOME cannot inherit authority from FM_ROOT_OVERRIDE"
 }
 
 test_hook_x_mode_reason_sources_cadence() {
@@ -360,13 +358,12 @@ test_hook_ignores_repo_state_when_fm_home_set() {
 }
 
 test_hook_uses_state_override() {
-  local dir home state out status
+  local dir state out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-state-override")
-  home="$TMP_ROOT/hook-state-override-home"
   state="$TMP_ROOT/hook-state-override-active"
-  mkdir -p "$home/state" "$state"
+  mkdir -p "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -606,7 +603,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy() {
 } >> "$log"
 EOF
   chmod +x "$fakebin/grok"
-  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
   [ -z "$out" ] || fail "grok adapter printed output: $out"
   assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
@@ -801,6 +798,8 @@ test_pi_extension_forces_followup() {
   assert_contains "$content" 'session-start operating block' "pi extension must use harness-neutral repair wording"
   assert_contains "$content" '.pi-turnend-extension-loaded' "pi extension must write its loaded marker for session-start diagnostics"
   assert_contains "$content" 'lockOwnership' "pi extension loaded marker must respect the session lock"
+  assert_contains "$content" 'fm-primary-identity.sh' "pi extension must use the canonical active-home identity guard"
+  assert_contains "$content" 'if (!primaryIdentity) return' "pi extension must stop before handler registration and marker writes"
   assert_contains "$content" 'const command = String((event.input as { command?: unknown })?.command ?? "")' "pi extension changed bash command extraction for the PreToolUse contract"
   assert_contains "$content" 'runPretoolCheck(command)' "pi extension changed the PreToolUse checker invocation"
   assert_contains "$content" 'return { block: true, reason:' "pi extension changed the checker exit-2 block result"
@@ -816,6 +815,9 @@ test_pi_extension_injects_once_per_logical_agent_run() {
   log="$TMP_ROOT/pi-logical-run-guard.log"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$repo/bin/fm-primary-identity.sh"
+  : > "$repo/AGENTS.md"
+  git init -q "$repo"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -827,8 +829,8 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-primary-identity.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" FM_GUARD_LOG="$log" node --input-type=module 2>&1 <<'EOF'
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -877,6 +879,9 @@ test_pi_extension_retries_after_followup_delivery_failure() {
   ext="$repo/.pi/extensions/fm-primary-turnend-guard.ts"
   mkdir -p "$repo/.pi/extensions" "$repo/bin" "$home/state"
   cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$ext"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$repo/bin/fm-primary-identity.sh"
+  : > "$repo/AGENTS.md"
+  git init -q "$repo"
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
 cat >/dev/null
@@ -887,8 +892,8 @@ SH
 #!/usr/bin/env bash
 exit 0
 SH
-  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh"
-  out=$(PLUGIN="$ext" FM_HOME="$home" node --input-type=module 2>&1 <<'EOF'
+  chmod +x "$repo/bin/fm-turnend-guard.sh" "$repo/bin/fm-arm-pretool-check.sh" "$repo/bin/fm-primary-identity.sh"
+  out=$(PLUGIN="$ext" FM_HOME="$repo" FM_STATE_OVERRIDE="$home/state" node --input-type=module 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 
 const handlers = new Map();
@@ -940,7 +945,7 @@ test_hook_blocks_when_dead_lock_has_fresh_beacon
 test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
-test_hook_blocks_from_fm_home_state
+test_hook_rejects_root_override_as_identity
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override

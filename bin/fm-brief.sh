@@ -48,6 +48,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+"$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
 
 usage() {
   awk '

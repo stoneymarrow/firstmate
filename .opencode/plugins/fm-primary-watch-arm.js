@@ -83,7 +83,6 @@ function effectivePaths(root) {
 
 async function isPrimaryRoot(root) {
   if (!root) return false;
-  if (process.env.FM_PRIMARY_IDENTITY_BYPASS === "1") return true;
   const result = await runProcess(`${root}/bin/fm-primary-identity.sh`, ["--code-root", root]);
   return result.code === 0;
 }

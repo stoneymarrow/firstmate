@@ -29,7 +29,7 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
-  cp "$ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
+  cp "$FM_TEST_SOURCE_ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -211,7 +211,7 @@ test_full_acceptance_matrix() {
 test_fires_in_secondmate_home() {
   local dir out rc
   dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
-  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
   assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
   pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
@@ -222,7 +222,7 @@ test_inert_in_child_worktree() {
   base="$TMP_ROOT/child-base"
   dir="$TMP_ROOT/child-wt"
   make_child_worktree_fixture "$base" "$dir" >/dev/null
-  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$base" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$base" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert in a crewmate/scout linked worktree"
   [ -z "$out" ] || fail "cd-guard produced output in a child worktree: $out"
   pass "cd-guard: inert in a crewmate/scout task worktree (code root differs from FM_HOME)"
@@ -234,7 +234,7 @@ test_inert_when_not_firstmate_repo() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   install_cd_scripts "$dir"   # bin/ present but no AGENTS.md
-  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert without AGENTS.md (not a firstmate checkout)"
   [ -z "$out" ] || fail "cd-guard produced output outside a firstmate checkout: $out"
   pass "cd-guard: inert in a non-firstmate repo (no AGENTS.md)"
@@ -246,7 +246,7 @@ test_inert_when_not_a_git_repo() {
   mkdir -p "$dir"
   : > "$dir/AGENTS.md"
   install_cd_scripts "$dir"   # AGENTS.md + bin/ but no git repo
-  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert when the checkout is not a git repo"
   [ -z "$out" ] || fail "cd-guard produced output in a non-git dir: $out"
   pass "cd-guard: inert when not inside a git repo"

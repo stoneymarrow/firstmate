@@ -17,13 +17,14 @@ type LockOwnership = "owned" | "missing" | "other";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
-const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
-const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
+const fmHome = process.env.FM_HOME || "";
+const fmRoot = root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
 const armScript = `${fmRoot}/bin/fm-watch-arm.sh`;
 const marker = `${state}/.pi-watch-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
+const primaryIdentity = spawnSync(`${root}/bin/fm-primary-identity.sh`, ["--code-root", root], { stdio: "ignore" }).status === 0;
 
 let child: any = null;
 let seq = 0;
@@ -86,6 +87,8 @@ function failureLine(stdout: string, stderr: string, code: number | null): strin
 }
 
 export default function (pi: ExtensionAPI) {
+  if (!primaryIdentity) return;
+
   function stopArm(): void {
     if (child) child.kill("SIGTERM");
     child = null;

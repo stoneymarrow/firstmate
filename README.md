@@ -86,19 +86,19 @@ Then launch one of the co-primary harnesses; AGENTS.md takes over from there:
 **Claude Code**
 
 ```sh
-claude
+FM_HOME="$PWD" claude
 ```
 
 **Grok**
 
 ```sh
-grok --trust
+FM_HOME="$PWD" grok --trust
 ```
 
 **Pi**
 
 ```sh
-pi
+FM_HOME="$PWD" pi
 ```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.

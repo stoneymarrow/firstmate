@@ -39,6 +39,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+"$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" || exit 0
 FM_ROOT="${FM_ROOT_OVERRIDE:-$CODE_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
@@ -61,11 +62,6 @@ command -v jq >/dev/null 2>&1 || exit 0
 
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
-
-# Hooks are tracked into every Firstmate checkout. Never let an inherited
-# FM_ROOT_OVERRIDE make code from a work/scout checkout impersonate the active
-# home; the physical checkout that supplied this hook must itself be FM_HOME.
-"$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" || exit 0
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # fm-primary-identity.sh owns this decision. Identity comes from physical
