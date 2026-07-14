@@ -16,6 +16,8 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-cd-pretool-check)
 
@@ -27,6 +29,7 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
+  cp "$ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -153,21 +156,21 @@ run_matrix_entry() {
   case "$entry" in
     codex)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_HOME="$PRIMARY" "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     claude)
       payload=$(jq -cn --arg command "$cmd" '{tool_name:"Bash",tool_input:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" --claude >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_HOME="$PRIMARY" "$CHECK" --claude >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     grok)
       payload=$(jq -cn --arg command "$cmd" '{toolName:"run_terminal_command",toolInput:{command:$command}}')
-      printf '%s' "$payload" | "$CHECK" >"$out_file" 2>"$err_file"
+      printf '%s' "$payload" | FM_HOME="$PRIMARY" "$CHECK" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     opencode|pi)
-      "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
+      FM_HOME="$PRIMARY" "$CHECK" --command "$cmd" >"$out_file" 2>"$err_file"
       rc=$?
       ;;
     *)
@@ -208,7 +211,7 @@ test_full_acceptance_matrix() {
 test_fires_in_secondmate_home() {
   local dir out rc
   dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
   assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
   pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
@@ -219,10 +222,10 @@ test_inert_in_child_worktree() {
   base="$TMP_ROOT/child-base"
   dir="$TMP_ROOT/child-wt"
   make_child_worktree_fixture "$base" "$dir" >/dev/null
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$base" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert in a crewmate/scout linked worktree"
   [ -z "$out" ] || fail "cd-guard produced output in a child worktree: $out"
-  pass "cd-guard: inert in a crewmate/scout task worktree (linked git worktree)"
+  pass "cd-guard: inert in a crewmate/scout task worktree (code root differs from FM_HOME)"
 }
 
 test_inert_when_not_firstmate_repo() {
@@ -231,7 +234,7 @@ test_inert_when_not_firstmate_repo() {
   git init -q "$dir"
   git -C "$dir" commit -q --allow-empty -m init
   install_cd_scripts "$dir"   # bin/ present but no AGENTS.md
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert without AGENTS.md (not a firstmate checkout)"
   [ -z "$out" ] || fail "cd-guard produced output outside a firstmate checkout: $out"
   pass "cd-guard: inert in a non-firstmate repo (no AGENTS.md)"
@@ -243,7 +246,7 @@ test_inert_when_not_a_git_repo() {
   mkdir -p "$dir"
   : > "$dir/AGENTS.md"
   install_cd_scripts "$dir"   # AGENTS.md + bin/ but no git repo
-  out=$("$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "cd-guard must be inert when the checkout is not a git repo"
   [ -z "$out" ] || fail "cd-guard produced output in a non-git dir: $out"
   pass "cd-guard: inert when not inside a git repo"
@@ -275,7 +278,7 @@ test_e2e_cwd_leak_regression() {
 
   # With the guard, the exact stray command is denied before it can run, so the
   # real harness never lets cwd leave the home.
-  out=$("$CHECK" --claude --command 'cd projects/clone' 2>&1); rc=$?
+  out=$(FM_HOME="$PRIMARY" "$CHECK" --claude --command 'cd projects/clone' 2>&1); rc=$?
   expect_code 2 "$rc" "guard must deny the stray persistent cd that caused the leak"
   assert_contains "$out" '[persistent-cd]' "leak-preventing block must carry the reason code"
   pass "cd-guard: reproduces the cwd leak and denies the exact command that causes it"
@@ -285,7 +288,7 @@ test_e2e_cwd_leak_regression() {
 
 test_fail_open_empty_stdin() {
   local out rc
-  out=$("$CHECK" < /dev/null 2>&1); rc=$?
+  out=$(FM_HOME="$PRIMARY" "$CHECK" < /dev/null 2>&1); rc=$?
   expect_code 0 "$rc" "transport must exit 0 on empty stdin"
   [ -z "$out" ] || fail "transport produced output on empty stdin: $out"
   pass "cd-guard: fails open on empty stdin"
@@ -293,7 +296,7 @@ test_fail_open_empty_stdin() {
 
 test_fail_open_unparseable_json() {
   local out rc
-  out=$(printf 'not json at all' | "$CHECK" 2>&1); rc=$?
+  out=$(printf 'not json at all' | FM_HOME="$PRIMARY" "$CHECK" 2>&1); rc=$?
   expect_code 0 "$rc" "transport must exit 0 on unparseable stdin JSON"
   [ -z "$out" ] || fail "transport produced output on unparseable JSON: $out"
   pass "cd-guard: fails open on unparseable stdin JSON"
@@ -307,7 +310,7 @@ test_fail_open_missing_node() {
     ln -s "$tool_path" "$fakebin/$tool"
   done
   # node deliberately absent from this PATH.
-  out=$(PATH="$fakebin" "$CHECK" --command 'cd projects/foo' 2>&1); rc=$?
+  out=$(PATH="$fakebin" FM_HOME="$PRIMARY" "$CHECK" --command 'cd projects/foo' 2>&1); rc=$?
   expect_code 0 "$rc" "transport must fail open when node is unavailable"
   [ -z "$out" ] || fail "transport produced output without node: $out"
   pass "cd-guard: fails open (never blocks) when node is missing"
@@ -321,7 +324,7 @@ test_fail_open_missing_jq_on_stdin() {
     ln -s "$tool_path" "$fakebin/$tool"
   done
   # jq deliberately absent: the stdin transport cannot extract the command.
-  out=$(printf '{"tool_input":{"command":"cd projects/foo"}}' | PATH="$fakebin" "$CHECK" 2>&1); rc=$?
+  out=$(printf '{"tool_input":{"command":"cd projects/foo"}}' | PATH="$fakebin" FM_HOME="$PRIMARY" "$CHECK" 2>&1); rc=$?
   expect_code 0 "$rc" "stdin transport must fail open when jq is unavailable"
   [ -z "$out" ] || fail "transport produced output without jq on the stdin path: $out"
   pass "cd-guard: fails open on the stdin path when jq is missing"

@@ -18,6 +18,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# Fixtures select their own homes and roots. Do not inherit the live primary's
+# overrides while exercising this worktree-isolation contract.
+unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+
 # shellcheck source=bin/fm-tangle-lib.sh
 . "$ROOT/bin/fm-tangle-lib.sh"
 
@@ -175,6 +179,7 @@ SH
 
 run_spawn() {
   local home=$1 id=$2 proj=$3 pane=$4 fakebin=$5
+  shift 5
   mkdir -p "$home/data/$id"
   printf 'brief\n' > "$home/data/$id/brief.md"
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
@@ -182,7 +187,7 @@ run_spawn() {
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex "$@" 2>&1
 }
 
 test_spawn_isolation_abort() {
@@ -212,6 +217,57 @@ test_spawn_isolation_abort() {
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "did not yield an isolated worktree" "isolated spawn wrongly tripped the guard"
   pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+}
+
+# This is deliberately an actual fm-spawn scout flow, not a hand-built linked
+# worktree fixture. The spawned task works on a Firstmate-shaped checkout, so it
+# receives the tracked primary hook files. Its inherited FM_HOME/FM_ROOT_OVERRIDE
+# still name the real home; the hook must remain inert because its code root is
+# the scout checkout, including when the worktree provider is a standalone pool
+# clone in production.
+test_spawned_firstmate_scout_primary_hooks_are_inert() {
+  local home project scout fakebin id out status hook_out
+  home="$TMP_ROOT/firstmate-scout-home"
+  project="$TMP_ROOT/firstmate-scout-project"
+  scout="$TMP_ROOT/firstmate-scout-worktree"
+  id=firstmate-scout-identity-g2
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  git clone -q "$ROOT" "$project"
+  git -C "$project" worktree add -q --detach "$scout"
+  # The test runs before this branch is committed, so make the spawned checkout
+  # carry the current tracked hook implementation just as it will after ship.
+  cp "$ROOT/bin/fm-primary-identity.sh" "$scout/bin/fm-primary-identity.sh"
+  cp "$ROOT/bin/fm-turnend-guard.sh" "$scout/bin/fm-turnend-guard.sh"
+  chmod +x "$scout/bin/fm-primary-identity.sh" "$scout/bin/fm-turnend-guard.sh"
+  fakebin=$(make_spawn_fakebin "$TMP_ROOT/firstmate-scout-fake")
+
+  out=$(run_spawn "$home" "$id" "$project" "$scout" "$fakebin" --scout); status=$?
+  expect_code 0 "$status" "fm-spawn must launch an isolated Firstmate-on-itself scout"
+  assert_contains "$out" "spawned $id" "Firstmate-on-itself scout did not spawn"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "spawned Firstmate scout did not record kind=scout"
+
+  : > "$home/state/in-flight.meta"
+  hook_out=$(printf '{"stop_hook_active":false}' | FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_STATE_OVERRIDE="$home/state" bash "$scout/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "spawned Firstmate scout hook must stay inert"
+  [ -z "$hook_out" ] || fail "spawned Firstmate scout hook produced a primary alarm: $hook_out"
+  pass "fm-spawn: a real Firstmate-on-itself scout cannot activate primary hooks"
+}
+
+test_worktree_refuses_fleet_primary_entrypoints() {
+  local home script out status
+  home="$TMP_ROOT/identity-refusal-home"
+  mkdir -p "$home"
+  for script in \
+    fm-session-start.sh fm-bootstrap.sh fm-spawn.sh fm-pr-merge.sh fm-merge-local.sh \
+    fm-fleet-sync.sh fm-config-push.sh fm-send.sh fm-teardown.sh fm-watch.sh \
+    fm-watch-arm.sh fm-wake-drain.sh fm-supervise-daemon.sh; do
+    out=$(FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$home" FM_ROOT_OVERRIDE="$home" "$ROOT/bin/$script" 2>&1)
+    status=$?
+    expect_code 3 "$status" "$script must refuse fleet-primary behavior from a worktree"
+    assert_contains "$out" "not the active FM_HOME" "$script did not explain its primary-identity refusal"
+  done
+  pass "fm-primary-identity: worktree rejects bootstrap, supervision, spawn, merge, and fleet entrypoints"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------
@@ -306,4 +362,6 @@ test_guard_banner
 test_bootstrap_line
 test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
+test_spawned_firstmate_scout_primary_hooks_are_inert
+test_worktree_refuses_fleet_primary_entrypoints
 test_spawn_tmux_window_construction

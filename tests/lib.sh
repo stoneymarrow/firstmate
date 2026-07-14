@@ -33,6 +33,10 @@ FM_TEST_LIB_SOURCED=1
 # the boundary against the real hazard is unaffected. tests/fm-gate-refuse.test.sh
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
+# Fleet-script tests intentionally point tracked code at disposable homes. They
+# are not primary adapter sessions, so they opt out of that production-only
+# identity assertion. Identity-specific tests clear this variable explicitly.
+export FM_PRIMARY_IDENTITY_BYPASS=1
 
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.

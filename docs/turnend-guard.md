@@ -17,12 +17,12 @@ When tasks are in flight and there is no live identity-matched watcher with a fr
 
 ## Shared Predicate
 
-The guard first scopes itself to a real primary checkout.
-A secondmate home runs its own primary firstmate session, so a genuine `.fm-secondmate-home` marker force-includes it whether treehouse leased it as a linked worktree or it is a git-cloned plain checkout.
-The marker must be a regular non-symlink file whose first line, after all whitespace is removed, contains a non-empty identifier made only of letters, digits, dots, underscores, and dashes.
-An unmarked checkout, or one with an invalid marker, falls through to the git-dir check.
-That check keeps crewmate and scout worktrees inert because firstmate provisions them as linked git worktrees, where `git rev-parse --git-dir` differs from `git rev-parse --git-common-dir`.
-It also requires `AGENTS.md`, `bin/`, and the effective state directory to exist.
+The guard first asks `bin/fm-primary-identity.sh` whether this is the active primary home.
+The script compares the physical root of the checkout that supplied the tracked hook with the explicit `FM_HOME` selected for the session.
+The main primary and a secondmate's own primary session pass because their code root is their home.
+Linked crewmate/scout worktrees and standalone Treehouse pool clones fail because their code root differs from the active home, even when a pool clone reports `git-dir == git-common-dir`.
+`FM_ROOT_OVERRIDE` is operational plumbing and never establishes identity because child processes inherit it from the primary.
+The check requires an explicit `FM_HOME`, `AGENTS.md`, and `bin/`; an unconfirmed identity fails open for hooks and is refused by fleet-primary entrypoints.
 
 For an in-scope primary checkout, it counts in-flight work from `state/*.meta`.
 If no task is in flight, it exits silently.
@@ -119,8 +119,8 @@ See `docs/arm-pretool-check.md`'s "Harness wiring" section for the same Grok exp
 
 The guard originally early-exited in every secondmate home on the `.fm-secondmate-home` marker.
 That was a scoping choice inherited from the guard's primary-only origin, not a defense against any secondmate-specific hazard.
-A genuinely marked secondmate home is now force-included as a guarded primary regardless of whether it is a treehouse-leased linked worktree or a git-cloned plain checkout.
-Only unmarked child worktrees fall through to the linked-worktree exemption, and marker validation prevents an empty, malformed, or symlink marker from spoofing inclusion.
+A secondmate's own session is now guarded through the same active-home identity as the main primary, regardless of whether its home is treehouse-leased or git-cloned.
+Its child worktrees are inert because their physical code root differs from the secondmate's `FM_HOME`.
 
 "No turn ends blind" for a secondmate is delivered by the same two mechanisms the main primary relies on.
 Mechanism B, the turn-end backstop, is this guard; its secondmate-home behavior is covered by hermetic tests in `tests/fm-turnend-guard.test.sh` (`test_hook_blocks_in_secondmate_own_home`, `test_hook_blocks_in_treehouse_leased_secondmate_home`, `test_hook_silent_in_idle_secondmate_home`, `test_hook_secondmate_loop_guard_allows_retry`, `test_hook_secondmate_reinvoke_recovery_loop`, `test_hook_silent_in_secondmate_child_worktree`, and `test_hook_exempts_linked_worktree_with_stray_marker`).
@@ -146,6 +146,7 @@ No Herdr command was issued and no fleet state was touched; the experiment wrote
 
 ## Tests
 
-`tests/fm-turnend-guard.test.sh` covers the shared predicate, primary scoping (including a secondmate's own home being guarded like the main primary while its child worktrees stay exempt), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-turnend-guard.test.sh` covers the shared predicate, the active-home identity matrix (actual primary, linked worktree, standalone pool clone, and secondmate home), `FM_HOME` and `FM_STATE_OVERRIDE` precedence, Pi logical-run latch behavior for no-tool and multi-tool runs, fail-open behavior without `jq`, tracked hook registration for all five harnesses, and the Grok adapter's forced-resume loop guard and permission-mode regression.
+`tests/fm-tangle-guard.test.sh` additionally drives a real `fm-spawn --scout` Firstmate-on-itself flow and proves the spawned hook remains inert.
 The default behavior suite does not invoke live language-model harnesses.
 `FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh` opts into the isolated interactive Pi regression recorded above.

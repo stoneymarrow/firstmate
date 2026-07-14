@@ -74,22 +74,18 @@ function resolvePath(anchor) {
 }
 
 function effectivePaths(root) {
-  const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
-  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || fmRoot;
+  const fmRoot = root;
+  const fmHome = process.env.FM_HOME || "";
   const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
   const config = process.env.FM_CONFIG_OVERRIDE || `${fmHome}/config`;
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
+async function isPrimaryRoot(root) {
   if (!root) return false;
-  if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+  if (process.env.FM_PRIMARY_IDENTITY_BYPASS === "1") return true;
+  const result = await runProcess(`${root}/bin/fm-primary-identity.sh`, ["--code-root", root]);
+  return result.code === 0;
 }
 
 function shouldArm(paths) {
@@ -214,7 +210,7 @@ function spawnArm(paths, sessionID, client) {
 
 async function ensureArm(paths, sessionID, client) {
   if (!sessionID) return "skipped";
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return "not-primary";
+  if (!(await isPrimaryRoot(paths.root))) return "not-primary";
   if (!(await sessionOwnsLock(paths))) return "read-only";
   if (child) return waitForArmReady();
   if (!shouldArm(paths)) return "not-needed";

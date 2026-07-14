@@ -23,8 +23,8 @@
 # improving itself" case). A secondmate home runs its OWN primary firstmate
 # session, so it must be guarded like the main primary; only child crew/scout
 # worktrees are exempt. It must therefore scope itself at runtime to a real
-# primary checkout - the main home or a genuinely marked secondmate home - and
-# stay a silent, fast no-op inside child task worktrees.
+# primary checkout - the main home or a secondmate's own active home - and stay
+# a silent, fast no-op inside child task worktrees.
 #
 # Loop-guard: never block twice in the same turn. Claude Code and codex Stop
 # payloads carry stop_hook_active=true when the CURRENT stop attempt was itself
@@ -38,7 +38,8 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$CODE_ROOT}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
@@ -61,49 +62,14 @@ command -v jq >/dev/null 2>&1 || exit 0
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2>/dev/null) || exit 0
 [ "$STOP_HOOK_ACTIVE" = "true" ] && exit 0
 
-# Return 0 when $1 (a firstmate root) carries a GENUINE secondmate-home marker.
-# bin/fm-home-seed.sh writes .fm-secondmate-home at a seeded secondmate home's
-# root (gitignored, so it never propagates into a child worktree); its content is
-# the secondmate id. Validate the marker's form so a stray/empty/symlink file
-# cannot spoof inclusion and an unmarked child is never guarded by accident: it
-# must be a regular (non-symlink) file whose first line, with all whitespace
-# removed, is a non-empty id token (letters, digits, dot, underscore, dash only).
-# The allowlist is matched under forced C (ASCII) collation - `local LC_ALL=C`,
-# restored on return - so a locale-crafted non-ASCII id cannot slip through the
-# range match and spoof force-inclusion. This is a deliberately lightweight
-# guard-local presence check, distinct from fm-ff-lib.sh's validate_secondmate_home
-# (which matches an EXPECTED id and does path-safety); the guard does not source
-# that heavier library.
-fm_root_is_secondmate_home() {
-  local marker="$1/.fm-secondmate-home" id LC_ALL=C
-  [ -L "$marker" ] && return 1
-  [ -f "$marker" ] || return 1
-  IFS= read -r id < "$marker" 2>/dev/null || return 1
-  id=${id//[[:space:]]/}
-  [ -n "$id" ] || return 1
-  case "$id" in
-    *[!A-Za-z0-9._-]*) return 1 ;;
-  esac
-  return 0
-}
+# Hooks are tracked into every Firstmate checkout. Never let an inherited
+# FM_ROOT_OVERRIDE make code from a work/scout checkout impersonate the active
+# home; the physical checkout that supplied this hook must itself be FM_HOME.
+"$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" || exit 0
 
 # --- scope precisely to a PRIMARY checkout ----------------------------------
-# A genuinely-marked secondmate home runs its OWN primary firstmate session, so
-# force-INCLUDE it as a guarded primary whether treehouse leased it as a linked
-# worktree (git-dir != git-common-dir) or it is a git-cloned plain checkout. This
-# mirrors the cd-guard's intent that a secondmate's own session is a guarded
-# primary. Only an UNMARKED checkout (or one with an invalid marker) falls
-# through to the linked-worktree exemption: firstmate hands out crewmate/scout
-# task worktrees as genuine linked `git worktree`s (bin/fm-spawn.sh aborts
-# otherwise), whose git-dir lives under the parent repo's .git/worktrees/<name>
-# and differs from the common (shared) git-dir, while a main, non-worktree
-# checkout has the two equal. Child worktrees never carry the gitignored marker,
-# so this exempts them while guarding every real secondmate home.
-if ! fm_root_is_secondmate_home "$FM_ROOT"; then
-  GIT_DIR=$(git -C "$FM_ROOT" rev-parse --git-dir 2>/dev/null) || exit 0
-  GIT_COMMON_DIR=$(git -C "$FM_ROOT" rev-parse --git-common-dir 2>/dev/null) || exit 0
-  [ "$GIT_DIR" = "$GIT_COMMON_DIR" ] || exit 0
-fi
+# fm-primary-identity.sh owns this decision. Identity comes from physical
+# code-root/FM_HOME equality, not Git's linked-worktree shape or a marker.
 [ -f "$FM_ROOT/AGENTS.md" ] || exit 0
 [ -d "$FM_ROOT/bin" ] || exit 0
 [ -d "$STATE" ] || exit 0

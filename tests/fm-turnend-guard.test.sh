@@ -13,6 +13,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# This suite owns every effective home explicitly. Do not inherit the live
+# firstmate process's operational overrides when it runs from a task checkout.
+unset FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE
+
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
 
@@ -88,6 +92,7 @@ install_guard_scripts() {
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-turnend-guard.sh" "$dir/bin/fm-turnend-guard.sh"
   cp "$ROOT/bin/fm-turnend-guard-grok.sh" "$dir/bin/fm-turnend-guard-grok.sh"
+  cp "$ROOT/bin/fm-primary-identity.sh" "$dir/bin/fm-primary-identity.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
@@ -115,8 +120,7 @@ make_primary_dir() {
   printf '%s\n' "$dir"
 }
 
-# Same shape as primary, plus the .fm-secondmate-home marker bin/fm-home-seed.sh
-# writes at seed time (regardless of treehouse-lease or git-clone acquisition).
+# Same shape as primary, plus the normal secondmate marker written at seed time.
 make_secondmate_dir() {
   local dir=$1
   make_primary_dir "$dir" >/dev/null
@@ -136,11 +140,21 @@ make_crewmate_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
-# A secondmate home's OWN child crew/scout worktree: a genuine linked git
-# worktree of the secondmate home, so git-dir != git-common-dir exactly as for a
-# main-home child worktree. A child worktree never carries the gitignored
-# .fm-secondmate-home marker, so the marker force-include never fires for it and
-# it stays exempt through the linked-worktree git-dir test.
+# A genuine standalone pool checkout. Unlike a linked worktree, this is a
+# complete clone, so git-dir equals git-common-dir even though it is not the
+# active Firstmate home.
+make_pool_clone_dir() {
+  local source=$1 dir=$2
+  git clone -q "$source" "$dir"
+  mkdir -p "$dir/state"
+  : > "$dir/AGENTS.md"
+  install_guard_scripts "$dir"
+  printf '%s\n' "$dir"
+}
+
+# A secondmate home's OWN child crew/scout worktree. Its physical code root
+# differs from the active secondmate home, so it stays exempt regardless of Git
+# worktree shape or marker files.
 make_secondmate_child_worktree_dir() {
   local home=$1 dir=$2
   git -C "$home" worktree add --quiet -b fm/turnend-secondmate-child "$dir"
@@ -150,11 +164,8 @@ make_secondmate_child_worktree_dir() {
   printf '%s\n' "$dir"
 }
 
-# A treehouse-leased secondmate HOME: a genuine linked `git worktree` (git-dir !=
-# git-common-dir, exactly like a default treehouse-leased home) that DOES carry a
-# valid .fm-secondmate-home marker. This is the production topology the plain
-# git-init secondmate fixture cannot represent; the guard must force-INCLUDE it
-# as a guarded primary via the marker, not exempt it as a linked worktree.
+# A treehouse-leased secondmate HOME: a genuine linked `git worktree` that still
+# owns its own active FM_HOME, so physical home identity includes it as primary.
 make_secondmate_linked_home_dir() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/turnend-secondmate-linked-home
@@ -166,9 +177,9 @@ make_secondmate_linked_home_dir() {
 }
 
 run_hook() {
-  local dir=$1 stop_active=$2 home
-  home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  local dir=$1 stop_active=$2 home=${3:-}
+  [ -n "$home" ] || home=$(cd "$dir" && pwd)
+  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_PRIMARY_IDENTITY_BYPASS= FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -193,6 +204,36 @@ record_watcher_lock() {
   printf '%s\n' "$root" > "$dir/state/.watch.lock/fm-home"
   printf '%s\n' "$bin_dir/fm-watch.sh" > "$dir/state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$dir/state/.watch.lock/pid-identity"
+}
+
+test_primary_identity_shape_matrix() {
+  local primary linked pool secondmate gd gcd status
+  primary=$(make_primary_dir "$TMP_ROOT/identity-primary")
+  linked="$TMP_ROOT/identity-linked"
+  fm_git_worktree "$primary" "$linked" fm/identity-linked
+  install_guard_scripts "$linked"
+  pool=$(make_pool_clone_dir "$primary" "$TMP_ROOT/identity-pool")
+  secondmate=$(make_secondmate_dir "$TMP_ROOT/identity-secondmate")
+
+  FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$primary/bin/fm-primary-identity.sh" --code-root "$primary"
+  status=$?
+  expect_code 0 "$status" "actual primary must satisfy the active-home identity"
+
+  if FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$linked/bin/fm-primary-identity.sh" --code-root "$linked"; then
+    fail "linked worktree must not satisfy the active-home identity"
+  fi
+
+  gd=$(git -C "$pool" rev-parse --git-dir)
+  gcd=$(git -C "$pool" rev-parse --git-common-dir)
+  [ "$gd" = "$gcd" ] || fail "pool fixture must be a standalone clone (git-dir == git-common-dir)"
+  if FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$primary" "$pool/bin/fm-primary-identity.sh" --code-root "$pool"; then
+    fail "standalone pool clone must not satisfy the active-home identity"
+  fi
+
+  FM_PRIMARY_IDENTITY_BYPASS= FM_HOME="$secondmate" "$secondmate/bin/fm-primary-identity.sh" --code-root "$secondmate"
+  status=$?
+  expect_code 0 "$status" "secondmate home must satisfy its own active-home identity"
+  pass "fm-primary-identity: actual primary and secondmate pass; linked worktree and standalone pool clone stay inert"
 }
 
 test_hook_silent_when_no_work_in_flight() {
@@ -423,27 +464,22 @@ test_hook_secondmate_reinvoke_recovery_loop() {
   pass "fm-turnend-guard: secondmate deferred-death recovery - silent while watched, forces re-arm once the watcher exits"
 }
 
-# The marker force-include must guard only the secondmate's OWN home, never its
-# children: a secondmate's linked crew/scout worktree carries no marker, so it
-# stays exempt by the same git-dir/git-common-dir test that exempts the main
-# home's children.
+# A secondmate's child worktree must stay inert even though its parent home is a
+# primary. Physical code-root mismatch, rather than marker propagation, owns it.
 test_hook_silent_in_secondmate_child_worktree() {
   local home dir out status
   home=$(make_secondmate_dir "$TMP_ROOT/hook-sm-child-home")
   dir="$TMP_ROOT/hook-sm-child-wt"
   make_secondmate_child_worktree_dir "$home" "$dir" >/dev/null
   : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" false); status=$?
+  out=$(run_hook "$dir" false "$home"); status=$?
   expect_code 0 "$status" "hook must stay exempt in a secondmate's own child crew/scout worktree"
   [ -z "$out" ] || fail "hook produced output inside a secondmate's child worktree: $out"
   pass "fm-turnend-guard: inert in a secondmate's own child worktree (linked git worktree) even when unhealthy"
 }
 
-# THE regression the plain git-init fixtures masked: a treehouse-leased secondmate
-# home is a genuine LINKED worktree (git-dir != git-common-dir), which the
-# remove-only form wrongly exempted. With the marker force-include, its own
-# primary session is GUARDED. The test asserts the fixture really is a linked
-# worktree so it can never silently regress back into a plain-checkout shape.
+# A treehouse-leased secondmate home is a genuine linked worktree but remains
+# guarded because its code root is its own active FM_HOME.
 test_hook_blocks_in_treehouse_leased_secondmate_home() {
   local base dir gd gcd out status
   base="$TMP_ROOT/hook-sm-leased-base"
@@ -454,16 +490,13 @@ test_hook_blocks_in_treehouse_leased_secondmate_home() {
   [ "$gd" != "$gcd" ] || fail "leased-home fixture must be a linked worktree (git-dir != git-common-dir), got equal: $gd"
   : > "$dir/state/task1.meta"
   out=$(run_hook "$dir" false); status=$?
-  expect_code 2 "$status" "hook must GUARD a treehouse-leased (linked) secondmate home via its marker when unhealthy"
+  expect_code 2 "$status" "hook must guard a treehouse-leased secondmate home when unhealthy"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
-  pass "fm-turnend-guard: blocks a blind turn end in a treehouse-leased LINKED secondmate home (marker force-include)"
+  pass "fm-turnend-guard: blocks a blind turn end in a treehouse-leased secondmate home"
 }
 
-# Anti-spoof: a linked worktree with an INVALID (empty) marker must NOT be
-# force-included. Marker validation rejects it, so it falls through to the
-# linked-worktree exemption and stays exempt - a stray/empty marker file can
-# never spoof a child worktree into being guarded.
+# A marker file in a child checkout cannot affect physical active-home identity.
 test_hook_exempts_linked_worktree_with_stray_marker() {
   local base dir out status
   base="$TMP_ROOT/hook-stray-marker-base"
@@ -471,16 +504,13 @@ test_hook_exempts_linked_worktree_with_stray_marker() {
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   : > "$dir/.fm-secondmate-home"
   : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" false); status=$?
-  expect_code 0 "$status" "an empty/invalid marker must not spoof force-inclusion in a linked worktree"
-  [ -z "$out" ] || fail "stray empty marker wrongly force-included a linked worktree: $out"
-  pass "fm-turnend-guard: an invalid (empty) marker cannot spoof inclusion; linked worktree stays exempt"
+  out=$(run_hook "$dir" false "$base"); status=$?
+  expect_code 0 "$status" "a stray marker must not activate a linked worktree"
+  [ -z "$out" ] || fail "stray marker activated a linked worktree: $out"
+  pass "fm-turnend-guard: a stray marker cannot activate a linked worktree"
 }
 
-# Anti-spoof under any locale: a NON-ASCII marker id must be REJECTED by the
-# ASCII-only (C-collation) allowlist, so it can never force-include a linked
-# worktree even where the ambient locale's collation would treat it as a letter.
-# Rejection -> git-dir exemption -> the linked worktree stays exempt.
+# Non-ASCII marker contents also cannot affect physical active-home identity.
 test_hook_exempts_linked_worktree_with_non_ascii_marker() {
   local base dir out status
   base="$TMP_ROOT/hook-nonascii-marker-base"
@@ -488,10 +518,10 @@ test_hook_exempts_linked_worktree_with_non_ascii_marker() {
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   printf 'caf\xc3\xa9\n' > "$dir/.fm-secondmate-home"
   : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" false); status=$?
-  expect_code 0 "$status" "a non-ASCII marker id must not spoof force-inclusion in a linked worktree"
-  [ -z "$out" ] || fail "non-ASCII marker wrongly force-included a linked worktree: $out"
-  pass "fm-turnend-guard: a non-ASCII marker cannot spoof inclusion; linked worktree stays exempt"
+  out=$(run_hook "$dir" false "$base"); status=$?
+  expect_code 0 "$status" "a non-ASCII marker must not activate a linked worktree"
+  [ -z "$out" ] || fail "non-ASCII marker activated a linked worktree: $out"
+  pass "fm-turnend-guard: a non-ASCII marker cannot activate a linked worktree"
 }
 
 test_hook_silent_in_crewmate_worktree() {
@@ -500,10 +530,24 @@ test_hook_silent_in_crewmate_worktree() {
   dir="$TMP_ROOT/hook-crew-wt"
   make_crewmate_worktree_dir "$base" "$dir" >/dev/null
   : > "$dir/state/task1.meta"
-  out=$(run_hook "$dir" false); status=$?
+  out=$(run_hook "$dir" false "$base"); status=$?
   expect_code 0 "$status" "hook must never block inside a crewmate task worktree"
   [ -z "$out" ] || fail "hook produced output inside a crewmate task worktree: $out"
   pass "fm-turnend-guard: inert in a crewmate/scout task worktree (linked git worktree) even when unhealthy"
+}
+
+test_hook_silent_in_standalone_pool_clone() {
+  local primary pool out status gd gcd
+  primary=$(make_primary_dir "$TMP_ROOT/hook-pool-primary")
+  pool=$(make_pool_clone_dir "$primary" "$TMP_ROOT/hook-pool-clone")
+  gd=$(git -C "$pool" rev-parse --git-dir)
+  gcd=$(git -C "$pool" rev-parse --git-common-dir)
+  [ "$gd" = "$gcd" ] || fail "pool hook fixture must be a standalone clone (git-dir == git-common-dir)"
+  : > "$pool/state/task1.meta"
+  out=$(run_hook "$pool" false "$primary"); status=$?
+  expect_code 0 "$status" "hook must stay inert in a standalone pool clone"
+  [ -z "$out" ] || fail "pool clone hook produced output: $out"
+  pass "fm-turnend-guard: inert in a standalone pool clone even though git dirs are equal"
 }
 
 test_hook_silent_without_jq() {
@@ -889,6 +933,7 @@ test_predicate_unhealthy_no_beacon
 test_predicate_unhealthy_stale_beacon
 test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
+test_primary_identity_shape_matrix
 test_hook_silent_when_no_work_in_flight
 test_hook_blocks_when_fresh_beacon_has_no_live_lock
 test_hook_blocks_when_dead_lock_has_fresh_beacon
@@ -909,6 +954,7 @@ test_hook_blocks_in_treehouse_leased_secondmate_home
 test_hook_exempts_linked_worktree_with_stray_marker
 test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
+test_hook_silent_in_standalone_pool_clone
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
