@@ -84,7 +84,7 @@ test_predicate_queue_pending_flag() {
 # --- HOOK: bin/fm-turnend-guard.sh ------------------------------------------
 #
 # Each scenario gets its own directory carrying a copy of the two guard scripts
-# under bin/, so the hook (invoked by absolute path) resolves its own FM_ROOT to
+# under bin/, so the hook (invoked by absolute path) resolves its own CODE_ROOT to
 # that scenario dir regardless of the test's cwd.
 
 install_guard_scripts() {
@@ -330,6 +330,22 @@ test_hook_rejects_root_override_as_identity() {
   expect_code 0 "$status" "an inherited root override must not establish primary identity"
   [ -z "$out" ] || fail "root override activated the turn-end guard without explicit FM_HOME: $out"
   pass "fm-turnend-guard: an empty FM_HOME cannot inherit authority from FM_ROOT_OVERRIDE"
+}
+
+test_hook_ignores_conflicting_root_override_after_identity() {
+  local primary secondmate dir conflict out status
+  primary=$(make_primary_dir "$TMP_ROOT/hook-conflicting-root-override-primary")
+  secondmate=$(make_secondmate_dir "$TMP_ROOT/hook-conflicting-root-override-secondmate")
+  conflict="$TMP_ROOT/conflicting-turnend-root"
+  mkdir -p "$conflict"
+  for dir in "$primary" "$secondmate"; do
+    : > "$dir/state/task1.meta"
+    out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$dir" FM_ROOT_OVERRIDE="$conflict" \
+      FM_STATE_OVERRIDE="$dir/state" FM_CONFIG_OVERRIDE= bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+    expect_code 2 "$status" "a conflicting root override must not suppress turn-end protection after identity succeeds"
+    assert_contains "$out" "$REQUIRED_REASON" "conflicting root override changed the turn-end block reason"
+  done
+  pass "fm-turnend-guard: conflicting FM_ROOT_OVERRIDE cannot suppress primary or secondmate protection"
 }
 
 test_hook_x_mode_reason_sources_cadence() {
@@ -946,6 +962,7 @@ test_hook_silent_with_live_lock_and_fresh_beacon
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_rejects_root_override_as_identity
+test_hook_ignores_conflicting_root_override_after_identity
 test_hook_x_mode_reason_sources_cadence
 test_hook_ignores_repo_state_when_fm_home_set
 test_hook_uses_state_override

@@ -121,18 +121,16 @@ case "$CMD" in
 esac
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || exit 0
-FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P)} || exit 0
-
 CODE_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pwd -P) || exit 0
 "$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" || exit 0
 
 # Scope is owned by fm-primary-identity.sh. Any failure to confirm the active
 # home is inert (exit 0), never a block, so a broken environment never denies a
 # shell command.
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
+[ -f "$CODE_ROOT/AGENTS.md" ] || exit 0
+[ -d "$CODE_ROOT/bin" ] || exit 0
 
-POLICY="$FM_ROOT/bin/fm-cd-command-policy.mjs"
+POLICY="$CODE_ROOT/bin/fm-cd-command-policy.mjs"
 command -v node >/dev/null 2>&1 || exit 0
 [ -f "$POLICY" ] || exit 0
 

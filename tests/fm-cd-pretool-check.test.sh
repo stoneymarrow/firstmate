@@ -228,6 +228,29 @@ test_inert_in_child_worktree() {
   pass "cd-guard: inert in a crewmate/scout task worktree (code root differs from FM_HOME)"
 }
 
+test_ignores_conflicting_root_override_after_identity() {
+  local conflict marker secondmate home check out rc
+  conflict="$TMP_ROOT/conflicting-cd-root"
+  marker="$conflict/policy-ran"
+  secondmate=$(make_secondmate_fixture "$TMP_ROOT/conflicting-cd-secondmate")
+  mkdir -p "$conflict/bin"
+  : > "$conflict/AGENTS.md"
+  cat > "$conflict/bin/fm-cd-command-policy.mjs" <<'JS'
+import { writeFileSync } from "node:fs";
+writeFileSync(process.env.FM_CONFLICT_POLICY_MARKER, "ran");
+process.stdout.write("allow\n");
+JS
+  for home in "$PRIMARY" "$secondmate"; do
+    check="$home/bin/fm-cd-pretool-check.sh"
+    out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$conflict" FM_CONFLICT_POLICY_MARKER="$marker" \
+      "$check" --claude --command 'cd projects/foo' 2>&1); rc=$?
+    expect_code 2 "$rc" "a conflicting root override must not redirect the cd policy after identity succeeds"
+    assert_contains "$out" '[persistent-cd]' "conflicting root override changed the cd-guard decision"
+    assert_absent "$marker" "cd-guard executed policy from FM_ROOT_OVERRIDE"
+  done
+  pass "cd-guard: conflicting FM_ROOT_OVERRIDE cannot redirect primary or secondmate policy"
+}
+
 test_inert_when_not_firstmate_repo() {
   local dir out rc
   dir="$TMP_ROOT/not-firstmate"
@@ -446,6 +469,7 @@ test_scripts_are_shellcheck_clean() {
 test_full_acceptance_matrix
 test_fires_in_secondmate_home
 test_inert_in_child_worktree
+test_ignores_conflicting_root_override_after_identity
 test_inert_when_not_firstmate_repo
 test_inert_when_not_a_git_repo
 test_e2e_cwd_leak_regression

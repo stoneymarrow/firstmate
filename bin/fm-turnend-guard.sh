@@ -40,8 +40,6 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 "$SCRIPT_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" || exit 0
-FM_ROOT="${FM_ROOT_OVERRIDE:-$CODE_ROOT}"
-FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
@@ -66,8 +64,8 @@ STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '.stop_hook_active // false' 2
 # --- scope precisely to a PRIMARY checkout ----------------------------------
 # fm-primary-identity.sh owns this decision. Identity comes from physical
 # code-root/FM_HOME equality, not Git's linked-worktree shape or a marker.
-[ -f "$FM_ROOT/AGENTS.md" ] || exit 0
-[ -d "$FM_ROOT/bin" ] || exit 0
+[ -f "$CODE_ROOT/AGENTS.md" ] || exit 0
+[ -d "$CODE_ROOT/bin" ] || exit 0
 [ -d "$STATE" ] || exit 0
 
 # --- the actual predicate ----------------------------------------------------
