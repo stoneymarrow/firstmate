@@ -273,14 +273,34 @@ test_worktree_refuses_fleet_primary_entrypoints() {
   pass "fm-primary-identity: worktree rejects every fleet-primary mutating entrypoint"
 }
 
-test_sourceable_primary_entrypoints_skip_runtime_identity() {
+test_sourceable_primary_entrypoints_load_without_identity() {
   local script out status
   for script in fm-afk-start.sh fm-supervise-daemon.sh fm-watch.sh; do
     out=$(FM_STATE_OVERRIDE="$TMP_ROOT/sourceable-${script%.sh}-state" bash -c 'unset FM_HOME FM_ROOT_OVERRIDE; . "$1"' _ "$FM_TEST_SOURCE_ROOT/bin/$script" 2>&1)
     status=$?
     expect_code 0 "$status" "$script must remain sourceable without active primary identity: $out"
   done
-  pass "sourceable primary entrypoints defer identity checks until execution"
+  pass "sourceable primary entrypoints load without requiring active identity"
+}
+
+test_sourced_mutating_mains_refuse_inherited_root_override() {
+  local script main state out status
+  while IFS='|' read -r script main; do
+    state="$TMP_ROOT/sourced-main-${script%.sh}-state"
+    mkdir -p "$state"
+    out=$(FM_HOME='' FM_ROOT_OVERRIDE="$FM_TEST_SOURCE_ROOT" FM_STATE_OVERRIDE="$state" FM_SUPERVISOR_BACKEND=unsupported \
+      bash -c '. "$1"; "$2"' _ "$FM_TEST_SOURCE_ROOT/bin/$script" "$main" 2>&1)
+    status=$?
+    expect_code 3 "$status" "$main must reject identity synthesized from FM_ROOT_OVERRIDE"
+    assert_contains "$out" "not the active FM_HOME" "$main did not explain its primary-identity refusal"
+    assert_absent "$state/.afk" "$main wrote away state before refusing inherited identity"
+    assert_absent "$state/.supervise-daemon.pid" "$main started supervision before refusing inherited identity"
+    assert_absent "$state/.supervise-daemon.lock" "$main acquired supervision state before refusing inherited identity"
+  done <<'ROWS'
+fm-afk-start.sh|fm_afk_start_main
+fm-supervise-daemon.sh|fm_super_main
+ROWS
+  pass "sourced mutating mains reject FM_ROOT_OVERRIDE as identity authority"
 }
 
 test_documented_primary_launch_sets_identity() {
@@ -384,6 +404,7 @@ test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawned_firstmate_scout_primary_hooks_are_inert
 test_worktree_refuses_fleet_primary_entrypoints
-test_sourceable_primary_entrypoints_skip_runtime_identity
+test_sourceable_primary_entrypoints_load_without_identity
+test_sourced_mutating_mains_refuse_inherited_root_override
 test_documented_primary_launch_sets_identity
 test_spawn_tmux_window_construction

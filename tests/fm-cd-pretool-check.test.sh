@@ -6,9 +6,9 @@
 # it reuses the shell classifier owned by bin/fm-arm-command-policy.mjs.
 # bin/fm-cd-pretool-check.sh is the stable transport: it scopes the guard to the
 # real primary checkout, then drives all five harness entry forms. This suite
-# proves the decision matrix, the harness-output shaping, the primary-checkout
-# scoping (including the deliberate secondmate-home difference from the turn-end
-# guard), the fail-open transport behavior, the prefilter fast path, the
+# proves the decision matrix, the harness-output shaping, the active-home
+# scoping across the main primary, secondmate homes, and child worktrees, the
+# fail-open transport behavior, the prefilter fast path, the
 # end-to-end cwd-leak regression, and the per-harness wiring. No harness is
 # spawned; live per-harness evidence lives in docs/cd-guard.md.
 set -u
@@ -21,7 +21,7 @@ unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OV
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-cd-pretool-check)
 
-# A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/ with
+# A primary-shaped checkout: git repo, AGENTS.md, bin/ with
 # the transport plus both policy files (fm-cd-command-policy.mjs imports the
 # shared classifier from fm-arm-command-policy.mjs). This is what the transport's
 # scoping treats as the real primary firstmate checkout.
@@ -54,7 +54,7 @@ make_secondmate_fixture() {
 }
 
 # A genuine linked git worktree - the shape bin/fm-spawn.sh hands crewmate/scout
-# tasks. git-dir and git-common-dir differ, so the guard must be inert.
+# tasks. Its code root differs from the active FM_HOME, so the guard is inert.
 make_child_worktree_fixture() {
   local base=$1 dir=$2
   fm_git_worktree "$base" "$dir" fm/cd-guard-test-branch
@@ -206,13 +206,13 @@ test_full_acceptance_matrix() {
   pass "cd-guard acceptance matrix: ${#MATRIX_IDS[@]} cases x 5 harness entry forms, block/allow all correct"
 }
 
-# --- primary-checkout scoping ----------------------------------------------
+# --- active-home scoping ----------------------------------------------------
 
 test_fires_in_secondmate_home() {
   local dir out rc
   dir=$(make_secondmate_fixture "$TMP_ROOT/secondmate")
   out=$(FM_HOME="$dir" "$dir/bin/fm-cd-pretool-check.sh" --claude --command 'cd projects/foo' 2>&1); rc=$?
-  expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session (unlike the turn-end guard)"
+  expect_code 2 "$rc" "cd-guard must fire in a secondmate's own primary session"
   assert_contains "$out" '[persistent-cd]' "secondmate-home block must carry the reason code"
   pass "cd-guard: fires in a secondmate home (its own primary session is a primary)"
 }

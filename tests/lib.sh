@@ -64,6 +64,7 @@ fm_test_cleanup() {
 FM_TEST_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC2034
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-root.XXXXXX") || exit 1
+ROOT=$(CDPATH='' cd -- "$ROOT" && pwd -P) || exit 1
 FM_TEST_CLEANUP_DIRS+=("$ROOT")
 trap fm_test_cleanup EXIT
 git clone -q --no-checkout "$FM_TEST_SOURCE_ROOT" "$ROOT" || exit 1

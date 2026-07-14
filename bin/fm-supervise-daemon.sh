@@ -141,6 +141,7 @@ set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="$(cd "$FM_DAEMON_DIR/.." && pwd)"
+FM_DAEMON_IDENTITY_HOME=${FM_HOME:-}
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   "$FM_DAEMON_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
 fi
@@ -1242,6 +1243,8 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
+  FM_HOME="$FM_DAEMON_IDENTITY_HOME" "$FM_DAEMON_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || return $?
+
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"

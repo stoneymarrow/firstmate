@@ -19,19 +19,16 @@ This guard is not a general sandbox.
 It classifies shell command positions only; it never evaluates, expands, sources, or runs any byte of the submitted command.
 Its threat model is agent mistakes, the same as the watcher-arm seatbelt: an accidental bare `cd projects/foo`, not a deliberately obfuscated bypass.
 
-## Scope: plain firstmate checkouts only
+## Scope: active Firstmate homes only
 
-The guard fires only in a plain firstmate checkout where git-dir equals git-common-dir.
-It is a silent no-op (exit 0, no output) everywhere else, so it never interferes with a crewmate or scout that legitimately works inside its own project or firstmate task worktree.
+The guard fires only when the physical checkout that supplied its tracked code matches the explicit, nonempty `FM_HOME` selected for the session.
+`bin/fm-primary-identity.sh` owns this predicate; `FM_ROOT_OVERRIDE`, git-dir, and git-common-dir never establish authority.
+A missing, invalid, or mismatched active home is a silent no-op (exit 0, no output), so the guard never interferes with a crewmate or scout working in another checkout.
 
-`bin/fm-cd-pretool-check.sh` owns its checkout detection; the turn-end guard's marker-aware scope is a separate contract (`docs/turnend-guard.md`).
-A plain, non-worktree checkout has `git rev-parse --git-dir` equal to `git rev-parse --git-common-dir`.
-A crewmate or scout task worktree - the shape `bin/fm-spawn.sh` always hands out - is a linked git worktree where the two differ, so the guard is inert there.
-The checkout must also carry `AGENTS.md` and `bin/`, and any failure to confirm the primary is treated as inert, never as a block.
-
-The cd-guard does not inspect `.fm-secondmate-home`.
-It therefore applies in a git-cloned secondmate home where git-dir equals git-common-dir, but remains inert in a treehouse-leased secondmate home that is itself a linked worktree.
-Secondmate child crew and scout worktrees are likewise inert under the linked-worktree test.
+The main primary and a secondmate's own primary session are in scope when each loads the guard from its own active home, regardless of whether that home is a plain clone or a linked worktree.
+Linked crewmate and scout worktrees are inert because their physical code root differs from the active home.
+Standalone Treehouse pool clones are also inert even though their git-dir equals their git-common-dir.
+The confirmed home must also carry `AGENTS.md` and `bin/`, and any failure to confirm that shape remains inert rather than blocking a shell command.
 
 ## Block vs allow
 
@@ -125,7 +122,7 @@ Every shell variable reference in the Grok hook command carries an inline defaul
 
 `tests/fm-cd-pretool-check.test.sh` owns the acceptance matrix.
 Every block and allow case runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the checkout scoping (fires in a git-cloned secondmate fixture, inert in a crewmate/scout linked worktree, inert outside a firstmate checkout, inert outside a git repo), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
+The suite also proves the end-to-end cwd-leak regression (a firstmate-owned backlog write leaking into a project clone, then denied at the exact command), the active-home scoping (fires when a main or secondmate code root matches its explicit `FM_HOME`, remains inert when a crewmate or scout code root differs, and remains inert outside a Firstmate-shaped git checkout), the fail-open transport behavior, the prefilter fast path, the policy CLI output contract, and the per-harness wiring.
 
 Run:
 

@@ -34,6 +34,7 @@ set -eu
 
 FM_AFK_START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="$(cd "$FM_AFK_START_DIR/.." && pwd)"
+FM_AFK_IDENTITY_HOME=${FM_HOME:-}
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   "$FM_AFK_START_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
 fi
@@ -115,6 +116,8 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_start_main() {
+  FM_HOME="$FM_AFK_IDENTITY_HOME" "$FM_AFK_START_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || return $?
+
   case "${1:-}" in
     '' ) ;;
     -h|--help) fm_afk_start_usage; return 0 ;;

@@ -29,8 +29,9 @@ It tokenizes the bytes and classifies lexical execution positions only.
 - `--claude` to preserve Claude's stderr-only deny requirement.
 
 The wrapper discovers the code root from its own location.
-The active firstmate home is `${FM_HOME:-<code-root>}`.
-It passes both roots and the exact command string to the Node policy owner.
+Before invoking the policy owner, it requires `bin/fm-primary-identity.sh` to confirm that this physical code root matches an explicit, nonempty `FM_HOME`.
+`FM_ROOT_OVERRIDE` and a code-root fallback never establish authority; a missing, invalid, or mismatched active home fails open without invoking the policy owner.
+For an in-scope session, the wrapper passes the physical code root, the explicit active home, and the exact command string to the Node policy owner.
 
 The wrapper fast-allows a command without invoking the Node policy owner only when the command cannot contain the `fm-watch` byte sequence even after the classifier's decoders run.
 The fast path may allow only when both of these hold:
