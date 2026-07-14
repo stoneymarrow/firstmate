@@ -66,13 +66,19 @@ FM_TEST_SOURCE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-root.XXXXXX") || exit 1
 FM_TEST_CLEANUP_DIRS+=("$ROOT")
 trap fm_test_cleanup EXIT
+git clone -q --no-checkout "$FM_TEST_SOURCE_ROOT" "$ROOT" || exit 1
+git -C "$ROOT" checkout -q --detach "$(git -C "$FM_TEST_SOURCE_ROOT" rev-parse HEAD)" || exit 1
+for _fm_test_base_ref in refs/heads/main refs/remotes/origin/main; do
+  if git -C "$FM_TEST_SOURCE_ROOT" rev-parse --verify -q "$_fm_test_base_ref^{commit}" >/dev/null; then
+    git -C "$ROOT" fetch -q "$FM_TEST_SOURCE_ROOT" "$_fm_test_base_ref:refs/remotes/origin/main" || exit 1
+    break
+  fi
+done
+unset _fm_test_base_ref
 (
   cd "$FM_TEST_SOURCE_ROOT" || exit 1
-  git ls-files -z | tar --null -T - -cf -
-) | tar -xf - -C "$ROOT" || exit 1
-git -C "$ROOT" init -q -b main
-git -C "$ROOT" add .
-git -C "$ROOT" -c user.name=fmtest -c user.email=fmtest@example.invalid commit -qm fixture
+  git diff --binary HEAD -- .
+) | git -C "$ROOT" apply --whitespace=nowarn || exit 1
 printf '#!/usr/bin/env bash\nexit 0\n' > "$ROOT/bin/fm-primary-identity.sh"
 chmod +x "$ROOT/bin/fm-primary-identity.sh"
 

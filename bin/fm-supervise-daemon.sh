@@ -141,7 +141,9 @@ set -u
 
 FM_DAEMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CODE_ROOT="$(cd "$FM_DAEMON_DIR/.." && pwd)"
-"$FM_DAEMON_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  "$FM_DAEMON_DIR/fm-primary-identity.sh" --code-root "$CODE_ROOT" --require || exit $?
+fi
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$FM_DAEMON_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 

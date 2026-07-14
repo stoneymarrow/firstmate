@@ -260,7 +260,7 @@ test_worktree_refuses_fleet_primary_entrypoints() {
   mkdir -p "$home"
   for script in \
     fm-session-start.sh fm-lock.sh fm-bootstrap.sh fm-brief.sh fm-spawn.sh \
-    fm-pr-check.sh fm-pr-merge.sh fm-promote.sh fm-merge-local.sh fm-home-seed.sh \
+    fm-pr-check.sh fm-pr-merge.sh fm-promote.sh fm-merge-local.sh fm-review-diff.sh fm-home-seed.sh \
     fm-backlog-handoff.sh fm-fleet-sync.sh fm-config-push.sh fm-update.sh \
     fm-send.sh fm-teardown.sh fm-watch.sh fm-watch-arm.sh fm-watch-checkpoint.sh \
     fm-wake-drain.sh fm-supervise-daemon.sh fm-afk-launch.sh fm-afk-start.sh \
@@ -271,6 +271,16 @@ test_worktree_refuses_fleet_primary_entrypoints() {
     assert_contains "$out" "not the active FM_HOME" "$script did not explain its primary-identity refusal"
   done
   pass "fm-primary-identity: worktree rejects every fleet-primary mutating entrypoint"
+}
+
+test_sourceable_primary_entrypoints_skip_runtime_identity() {
+  local script out status
+  for script in fm-afk-start.sh fm-supervise-daemon.sh fm-watch.sh; do
+    out=$(FM_STATE_OVERRIDE="$TMP_ROOT/sourceable-${script%.sh}-state" bash -c 'unset FM_HOME FM_ROOT_OVERRIDE; . "$1"' _ "$FM_TEST_SOURCE_ROOT/bin/$script" 2>&1)
+    status=$?
+    expect_code 0 "$status" "$script must remain sourceable without active primary identity: $out"
+  done
+  pass "sourceable primary entrypoints defer identity checks until execution"
 }
 
 test_documented_primary_launch_sets_identity() {
@@ -374,5 +384,6 @@ test_brief_assertion_precedes_branch
 test_spawn_isolation_abort
 test_spawned_firstmate_scout_primary_hooks_are_inert
 test_worktree_refuses_fleet_primary_entrypoints
+test_sourceable_primary_entrypoints_skip_runtime_identity
 test_documented_primary_launch_sets_identity
 test_spawn_tmux_window_construction
