@@ -45,6 +45,7 @@ advance_remote() {
   content=$4
   message=$5
   git clone -q "$bare" "$work"
+  mkdir -p "$(dirname "$work/$file")"
   printf '%s\n' "$content" > "$work/$file"
   git -C "$work" add "$file"
   git -C "$work" commit -qm "$message"
@@ -119,6 +120,47 @@ test_no_delta_is_a_noop() {
   pass 'no upstream delta is a no-op'
 }
 
+test_agents_drift_is_corrected_without_upstream_delta() {
+  case_dir="$TMP_ROOT/agents-drift"
+  mkdir -p "$case_dir"
+  make_bare_pair "$case_dir"
+  advance_remote "$case_dir/origin.git" "$case_dir/origin-work" \
+    AGENTS.md '# Fork-local instructions that must be corrected' 'drift fork agents'
+  clone_fork_worktree "$case_dir"
+  output="$case_dir/output"
+  (
+    cd "$case_dir/work"
+    FM_SYNC_OUTPUT="$output" "$SCRIPT" prepare
+  )
+  sync_ref=$(git -C "$case_dir/origin.git" rev-parse refs/heads/automation/upstream-sync)
+  upstream_head=$(git -C "$case_dir/upstream.git" rev-parse refs/heads/main)
+  [ "$(git -C "$case_dir/origin.git" show "$sync_ref:AGENTS.md")" = \
+      "$(git -C "$case_dir/upstream.git" show "$upstream_head:AGENTS.md")" ] || \
+    fail 'AGENTS.md drift must be corrected from upstream'
+  assert_grep 'has_delta=true' "$output" 'AGENTS.md drift must create a review delta'
+  pass 'upstream AGENTS.md authority is restored without a commit delta'
+}
+
+test_private_paths_are_refused_before_early_exit() {
+  case_dir="$TMP_ROOT/private-no-delta"
+  mkdir -p "$case_dir"
+  make_bare_pair "$case_dir"
+  advance_remote "$case_dir/origin.git" "$case_dir/origin-work" \
+    data/private.txt 'fork-private' 'track fork-private path'
+  clone_fork_worktree "$case_dir"
+  if (
+    cd "$case_dir/work"
+    "$SCRIPT" prepare >"$case_dir/stdout" 2>"$case_dir/stderr"
+  ); then
+    fail 'base-only private paths must fail before the no-delta exit'
+  fi
+  assert_grep 'refusing tracked fleet-private paths' "$case_dir/stderr" \
+    'private-path refusal must explain the failure'
+  ! git -C "$case_dir/origin.git" show-ref --verify --quiet \
+    refs/heads/automation/upstream-sync || fail 'private paths must not create a sync branch'
+  pass 'fork-private paths are refused before no-delta handling'
+}
+
 test_conflict_stages_upstream_for_human_review() {
   case_dir="$TMP_ROOT/conflict"
   mkdir -p "$case_dir"
@@ -156,7 +198,12 @@ test_existing_pr_is_refreshed_without_duplicate_or_merge() {
 set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$1 $2" in
-  'pr list') printf '42\n' ;;
+  'pr list')
+    case "$*" in
+      *'headRepositoryOwner.login == "stoneymarrow"'*) printf '42\n' ;;
+      *) printf 'missing repository-owner filter\n' >&2; exit 97 ;;
+    esac
+    ;;
   'pr edit')
     while [ "$#" -gt 0 ]; do
       if [ "$1" = '--body-file' ]; then
@@ -174,7 +221,7 @@ esac
 SH
   chmod +x "$fakebin/gh"
   GH_LOG="$log" GH_BODY="$body" PATH="$fakebin:$PATH" \
-    FM_SYNC_REPOSITORY='fork/firstmate' \
+    FM_SYNC_REPOSITORY='stoneymarrow/firstmate' \
     FM_SYNC_BASE_BRANCH=main \
     FM_SYNC_BRANCH=automation/upstream-sync \
     FM_SYNC_BASE_SHA=1111111111111111111111111111111111111111 \
@@ -183,6 +230,8 @@ SH
     FM_SYNC_CONFLICT=false \
     "$SCRIPT" upsert-pr >/dev/null
   assert_grep 'pr edit 42' "$log" 'existing sync PR must be refreshed'
+  assert_grep '--json number,headRepositoryOwner' "$log" \
+    'existing PR lookup must request the head repository owner'
   assert_no_grep 'pr create' "$log" 'existing sync PR must not be duplicated'
   assert_grep 'it never merges or enables auto-merge' "$body" \
     'PR body must state the no-auto-merge contract'
@@ -191,10 +240,49 @@ SH
   pass 'existing PR is refreshed and remains review-only'
 }
 
+test_external_fork_pr_does_not_collide_with_sync_pr() {
+  case_dir="$TMP_ROOT/pr-owner-collision"
+  fakebin=$(fm_fakebin "$case_dir")
+  log="$case_dir/gh.log"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$1 $2" in
+  'pr list')
+    case "$*" in
+      *'headRepositoryOwner.login == "stoneymarrow"'*) : ;;
+      *) printf 'missing repository-owner filter\n' >&2; exit 97 ;;
+    esac
+    ;;
+  'pr create') printf 'https://github.test/stoneymarrow/firstmate/pull/43\n' ;;
+  'pr edit') printf 'external fork PR was edited\n' >&2; exit 99 ;;
+  *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 98 ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  GH_LOG="$log" PATH="$fakebin:$PATH" \
+    FM_SYNC_REPOSITORY='stoneymarrow/firstmate' \
+    FM_SYNC_BASE_BRANCH=main \
+    FM_SYNC_BRANCH=automation/upstream-sync \
+    FM_SYNC_BASE_SHA=1111111111111111111111111111111111111111 \
+    FM_SYNC_UPSTREAM_SHA=2222222222222222222222222222222222222222 \
+    FM_SYNC_UPSTREAM_REPOSITORY='kunchenguid/firstmate' \
+    FM_SYNC_CONFLICT=false \
+    "$SCRIPT" upsert-pr >/dev/null
+  assert_grep 'pr create' "$log" 'external fork collision must create the fork-local PR'
+  assert_no_grep 'pr edit' "$log" 'external fork collision must not edit another PR'
+  pass 'same-branch external fork PRs cannot collide with the sync PR'
+}
+
 test_workflow_contract_is_static_and_fork_only() {
   assert_grep 'schedule:' "$WORKFLOW" 'workflow must run daily'
   assert_grep 'github.event.repository.fork == true' "$WORKFLOW" \
     'workflow must be inert in the upstream repository'
+  assert_grep "GITHUB_REPOSITORY\" = 'stoneymarrow/firstmate'" "$WORKFLOW" \
+    'workflow must pin the only writable repository'
+  assert_grep "upstream_repository\" = 'kunchenguid/firstmate'" "$WORKFLOW" \
+    'workflow must pin the fetch-only upstream repository'
   assert_grep 'FM_SYNC_BRANCH: automation/upstream-sync' "$WORKFLOW" \
     'workflow must target the dedicated review branch'
   assert_grep 'git remote set-url --push upstream DISABLED' "$WORKFLOW" \
@@ -210,6 +298,9 @@ test_workflow_contract_is_static_and_fork_only() {
 
 test_clean_sync_targets_fork_branch_and_is_idempotent
 test_no_delta_is_a_noop
+test_agents_drift_is_corrected_without_upstream_delta
+test_private_paths_are_refused_before_early_exit
 test_conflict_stages_upstream_for_human_review
 test_existing_pr_is_refreshed_without_duplicate_or_merge
+test_external_fork_pr_does_not_collide_with_sync_pr
 test_workflow_contract_is_static_and_fork_only

@@ -60,7 +60,9 @@ validate_branch() {
 }
 
 assert_no_private_paths() {
-  tracked=$(git ls-files -- data state config projects .no-mistakes)
+  treeish=$1
+  tracked=$(git ls-tree -r --name-only "$treeish" -- \
+    data state config projects .no-mistakes)
   if [ -n "$tracked" ]; then
     printf 'fm-upstream-sync.sh: refusing tracked fleet-private paths:\n%s\n' "$tracked" >&2
     exit 1
@@ -126,12 +128,25 @@ prepare() {
   upstream_sha=$(git rev-parse "refs/remotes/$upstream_remote/$upstream_branch")
   git merge-base "$base_sha" "$upstream_sha" >/dev/null 2>&1 || \
     die "fork and upstream branches do not share history"
+  git cat-file -e "$upstream_sha:AGENTS.md" 2>/dev/null || \
+    die "upstream AGENTS.md is missing"
+  assert_no_private_paths "$base_sha"
+  assert_no_private_paths "$upstream_sha"
+
+  agents_match=true
+  if ! git diff --quiet "$base_sha" "$upstream_sha" -- AGENTS.md; then
+    agents_match=false
+  fi
 
   write_output base_sha "$base_sha"
   write_output upstream_sha "$upstream_sha"
   write_output branch "$sync_branch"
 
+  upstream_is_ancestor=false
   if git merge-base --is-ancestor "$upstream_sha" "$base_sha"; then
+    upstream_is_ancestor=true
+  fi
+  if [ "$upstream_is_ancestor" = true ] && [ "$agents_match" = true ]; then
     write_output has_delta false
     write_output branch_updated false
     write_output conflict false
@@ -151,7 +166,14 @@ prepare() {
     existing_base=$(trailer_value "$existing_sha" Upstream-Sync-Base)
     existing_upstream=$(trailer_value "$existing_sha" Upstream-Sync-Head)
     existing_conflict=$(trailer_value "$existing_sha" Upstream-Sync-Conflict)
-    if [ "$existing_base" = "$base_sha" ] && [ "$existing_upstream" = "$upstream_sha" ]; then
+    assert_no_private_paths "$existing_sha"
+    existing_agents_match=true
+    if ! git diff --quiet "$existing_sha" "$upstream_sha" -- AGENTS.md; then
+      existing_agents_match=false
+    fi
+    if [ "$existing_base" = "$base_sha" ] && \
+        [ "$existing_upstream" = "$upstream_sha" ] && \
+        [ "$existing_agents_match" = true ]; then
       write_output has_delta true
       write_output branch_updated false
       write_output conflict "${existing_conflict:-false}"
@@ -162,15 +184,17 @@ prepare() {
 
   git checkout --detach "$base_sha"
   conflict=false
-  if git -c user.name='Firstmate upstream sync' \
-      -c user.email='actions@users.noreply.github.com' \
-      merge --no-ff --no-commit "$upstream_sha"; then
-    git cat-file -e "$upstream_sha:AGENTS.md" 2>/dev/null || \
-      die "upstream AGENTS.md is missing"
+  if [ "$upstream_is_ancestor" = true ]; then
     git checkout "$upstream_sha" -- AGENTS.md
     git diff --quiet "$upstream_sha" -- AGENTS.md || \
       die "generated branch did not retain upstream AGENTS.md"
-    assert_no_private_paths
+    commit_managed_marker 'chore: restore upstream AGENTS.md' false
+  elif git -c user.name='Firstmate upstream sync' \
+      -c user.email='actions@users.noreply.github.com' \
+      merge --no-ff --no-commit "$upstream_sha"; then
+    git checkout "$upstream_sha" -- AGENTS.md
+    git diff --quiet "$upstream_sha" -- AGENTS.md || \
+      die "generated branch did not retain upstream AGENTS.md"
     commit_managed_marker 'chore: sync fork with upstream' false
   else
     if [ -z "$(git ls-files -u)" ]; then
@@ -180,9 +204,6 @@ prepare() {
     conflict=true
     git merge --abort
     git checkout --detach "$upstream_sha"
-    git cat-file -e "$upstream_sha:AGENTS.md" 2>/dev/null || \
-      die "upstream AGENTS.md is missing"
-    assert_no_private_paths
     commit_managed_marker 'chore: stage conflicting upstream sync for review' true true
   fi
 
@@ -215,6 +236,13 @@ upsert_pr() {
   [ -n "$base_sha" ] || die "FM_SYNC_BASE_SHA is required"
   [ -n "$upstream_sha" ] || die "FM_SYNC_UPSTREAM_SHA is required"
   [ -n "$upstream_repository" ] || die "FM_SYNC_UPSTREAM_REPOSITORY is required"
+  case "$repository" in
+    */*) repository_owner=${repository%%/*} ;;
+    *) die "FM_SYNC_REPOSITORY must be owner/name" ;;
+  esac
+  case "$repository_owner" in
+    ''|*[!A-Za-z0-9-]*) die "FM_SYNC_REPOSITORY owner is invalid" ;;
+  esac
   case "$conflict" in
     true|false) : ;;
     *) die "FM_SYNC_CONFLICT must be true or false" ;;
@@ -243,7 +271,8 @@ upsert_pr() {
   } > "$body_file"
 
   pr_number=$(gh pr list --repo "$repository" --state open --base "$base_branch" \
-    --head "$sync_branch" --json number --jq '.[0].number // empty')
+    --head "$sync_branch" --json number,headRepositoryOwner \
+    --jq "first(.[] | select(.headRepositoryOwner.login == \"$repository_owner\") | .number) // empty")
   if [ -n "$pr_number" ]; then
     gh pr edit "$pr_number" --repo "$repository" --title "$title" --body-file "$body_file"
   else
