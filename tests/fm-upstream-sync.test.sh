@@ -92,6 +92,7 @@ test_clean_sync_targets_fork_branch_and_is_idempotent() {
     fail 'prepare must disable the upstream push URL'
   assert_grep 'has_delta=true' "$first_output" 'clean sync must report an upstream delta'
   assert_grep 'conflict=false' "$first_output" 'clean sync must report no conflict'
+  assert_grep 'mode=merge' "$first_output" 'clean sync must report merge topology'
 
   second_output="$case_dir/second.output"
   (
@@ -101,6 +102,7 @@ test_clean_sync_targets_fork_branch_and_is_idempotent() {
   second_ref=$(git -C "$case_dir/origin.git" rev-parse refs/heads/automation/upstream-sync)
   [ "$second_ref" = "$sync_ref" ] || fail 'identical rerun must not rewrite the sync branch'
   assert_grep 'branch_updated=false' "$second_output" 'identical rerun must report no branch update'
+  assert_grep 'mode=merge' "$second_output" 'identical rerun must preserve merge topology'
   pass 'clean sync targets only the fork review branch and is idempotent'
 }
 
@@ -115,6 +117,7 @@ test_no_delta_is_a_noop() {
     FM_SYNC_OUTPUT="$output" "$SCRIPT" prepare
   )
   assert_grep 'has_delta=false' "$output" 'equal fork and upstream must report no delta'
+  assert_grep 'mode=none' "$output" 'equal fork and upstream must report no topology'
   ! git -C "$case_dir/origin.git" show-ref --verify --quiet \
     refs/heads/automation/upstream-sync || fail 'no-delta run must not create a sync branch'
   pass 'no upstream delta is a no-op'
@@ -138,6 +141,48 @@ test_agents_drift_is_corrected_without_upstream_delta() {
       "$(git -C "$case_dir/upstream.git" show "$upstream_head:AGENTS.md")" ] || \
     fail 'AGENTS.md drift must be corrected from upstream'
   assert_grep 'has_delta=true' "$output" 'AGENTS.md drift must create a review delta'
+  assert_grep 'mode=agents-correction' "$output" \
+    'AGENTS.md drift must report correction topology'
+
+  fakebin=$(fm_fakebin "$case_dir")
+  body="$case_dir/body.md"
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  api) : ;;
+  pr)
+    [ "$2" = create ] || exit 98
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = '--body-file' ]; then
+        shift
+        cp "$1" "$GH_BODY"
+        break
+      fi
+      shift
+    done
+    printf 'https://github.test/stoneymarrow/firstmate/pull/44\n'
+    ;;
+  *) exit 98 ;;
+esac
+SH
+  chmod +x "$fakebin/gh"
+  base_sha=$(sed -n 's/^base_sha=//p' "$output")
+  upstream_sha=$(sed -n 's/^upstream_sha=//p' "$output")
+  GH_BODY="$body" PATH="$fakebin:$PATH" \
+    FM_SYNC_REPOSITORY='stoneymarrow/firstmate' \
+    FM_SYNC_BASE_BRANCH=main \
+    FM_SYNC_BRANCH=automation/upstream-sync \
+    FM_SYNC_BASE_SHA="$base_sha" \
+    FM_SYNC_UPSTREAM_SHA="$upstream_sha" \
+    FM_SYNC_UPSTREAM_REPOSITORY='kunchenguid/firstmate' \
+    FM_SYNC_CONFLICT=false \
+    FM_SYNC_MODE=agents-correction \
+    "$SCRIPT" upsert-pr >/dev/null
+  assert_grep 'one-parent correction commit' "$body" \
+    'AGENTS.md correction PR must describe its topology accurately'
+  assert_no_grep 'two-parent merge commit' "$body" \
+    'AGENTS.md correction PR must not claim merge topology'
   pass 'upstream AGENTS.md authority is restored without a commit delta'
 }
 
@@ -182,6 +227,7 @@ test_conflict_stages_upstream_for_human_review() {
   [ "$(git -C "$case_dir/origin.git" rev-parse refs/heads/main)" = "$base_before" ] || \
     fail 'conflict handling must leave fork main untouched'
   assert_grep 'conflict=true' "$output" 'conflict run must require human review'
+  assert_grep 'mode=conflict' "$output" 'conflict run must report conflict topology'
   assert_grep 'Upstream-Sync-Managed: true' \
     <(git -C "$case_dir/origin.git" show -s --format=%B "$sync_ref") \
     'conflict marker must identify the automation-owned branch'
@@ -197,25 +243,29 @@ test_existing_pr_is_refreshed_without_duplicate_or_merge() {
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
-case "$1 $2" in
-  'pr list')
+case "$1" in
+  api)
     case "$*" in
-      *'headRepositoryOwner.login == "stoneymarrow"'*) printf '42\n' ;;
-      *) printf 'missing repository-owner filter\n' >&2; exit 97 ;;
+      *'repos/stoneymarrow/firstmate/pulls'*'head=stoneymarrow:automation/upstream-sync'*) printf '42\n' ;;
+      *) printf 'missing owner-qualified head filter\n' >&2; exit 97 ;;
     esac
     ;;
-  'pr edit')
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = '--body-file' ]; then
-        shift
-        cp "$1" "$GH_BODY"
-        break
-      fi
-      shift
-    done
+  pr)
+    case "$2" in
+      edit)
+        while [ "$#" -gt 0 ]; do
+          if [ "$1" = '--body-file' ]; then
+            shift
+            cp "$1" "$GH_BODY"
+            break
+          fi
+          shift
+        done
+        ;;
+      view) printf 'https://github.test/stoneymarrow/firstmate/pull/42\n' ;;
+      *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 98 ;;
+    esac
     ;;
-  'pr view') printf 'https://github.test/fork/firstmate/pull/42\n' ;;
-  'pr create') printf 'duplicate PR attempted\n' >&2; exit 99 ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 98 ;;
 esac
 SH
@@ -228,10 +278,13 @@ SH
     FM_SYNC_UPSTREAM_SHA=2222222222222222222222222222222222222222 \
     FM_SYNC_UPSTREAM_REPOSITORY='kunchenguid/firstmate' \
     FM_SYNC_CONFLICT=false \
+    FM_SYNC_MODE=merge \
     "$SCRIPT" upsert-pr >/dev/null
   assert_grep 'pr edit 42' "$log" 'existing sync PR must be refreshed'
-  assert_grep '--json number,headRepositoryOwner' "$log" \
-    'existing PR lookup must request the head repository owner'
+  assert_grep 'api --method GET repos/stoneymarrow/firstmate/pulls' "$log" \
+    'existing PR lookup must query the pulls API'
+  assert_grep 'head=stoneymarrow:automation/upstream-sync' "$log" \
+    'existing PR lookup must owner-qualify the head branch'
   assert_no_grep 'pr create' "$log" 'existing sync PR must not be duplicated'
   assert_grep 'it never merges or enables auto-merge' "$body" \
     'PR body must state the no-auto-merge contract'
@@ -248,15 +301,20 @@ test_external_fork_pr_does_not_collide_with_sync_pr() {
 #!/usr/bin/env bash
 set -eu
 printf '%s\n' "$*" >> "$GH_LOG"
-case "$1 $2" in
-  'pr list')
+case "$1" in
+  api)
     case "$*" in
-      *'headRepositoryOwner.login == "stoneymarrow"'*) : ;;
-      *) printf 'missing repository-owner filter\n' >&2; exit 97 ;;
+      *'head=stoneymarrow:automation/upstream-sync'*) : ;;
+      *) printf 'missing owner-qualified head filter\n' >&2; exit 97 ;;
     esac
     ;;
-  'pr create') printf 'https://github.test/stoneymarrow/firstmate/pull/43\n' ;;
-  'pr edit') printf 'external fork PR was edited\n' >&2; exit 99 ;;
+  pr)
+    [ "$2" = create ] || {
+      printf 'external fork PR was edited\n' >&2
+      exit 99
+    }
+    printf 'https://github.test/stoneymarrow/firstmate/pull/43\n'
+    ;;
   *) printf 'unexpected gh call: %s\n' "$*" >&2; exit 98 ;;
 esac
 SH
@@ -269,6 +327,7 @@ SH
     FM_SYNC_UPSTREAM_SHA=2222222222222222222222222222222222222222 \
     FM_SYNC_UPSTREAM_REPOSITORY='kunchenguid/firstmate' \
     FM_SYNC_CONFLICT=false \
+    FM_SYNC_MODE=merge \
     "$SCRIPT" upsert-pr >/dev/null
   assert_grep 'pr create' "$log" 'external fork collision must create the fork-local PR'
   assert_no_grep 'pr edit' "$log" 'external fork collision must not edit another PR'
@@ -285,6 +344,8 @@ test_workflow_contract_is_static_and_fork_only() {
     'workflow must pin the fetch-only upstream repository'
   assert_grep 'FM_SYNC_BRANCH: automation/upstream-sync' "$WORKFLOW" \
     'workflow must target the dedicated review branch'
+  assert_grep "FM_SYNC_MODE: \${{ steps.prepare.outputs.mode }}" "$WORKFLOW" \
+    'workflow must propagate the prepared sync topology'
   assert_grep 'git remote set-url --push upstream DISABLED' "$WORKFLOW" \
     'workflow must configure upstream as fetch-only'
   assert_grep "git push \"\$origin_remote\"" "$SCRIPT" \

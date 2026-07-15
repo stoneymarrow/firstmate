@@ -88,4 +88,5 @@ jobs:
           FM_SYNC_UPSTREAM_SHA: ${{ steps.prepare.outputs.upstream_sha }}
           FM_SYNC_UPSTREAM_REPOSITORY: kunchenguid/firstmate
           FM_SYNC_CONFLICT: ${{ steps.prepare.outputs.conflict }}
+          FM_SYNC_MODE: ${{ steps.prepare.outputs.mode }}
         run: bin/fm-upstream-sync.sh upsert-pr

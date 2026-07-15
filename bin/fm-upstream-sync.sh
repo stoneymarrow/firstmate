@@ -26,8 +26,8 @@
 #   FM_SYNC_OUTPUT              key=value output file (default: GITHUB_OUTPUT)
 #
 # upsert-pr additionally requires FM_SYNC_REPOSITORY, FM_SYNC_BASE_SHA,
-# FM_SYNC_UPSTREAM_SHA, and FM_SYNC_UPSTREAM_REPOSITORY. It accepts
-# FM_SYNC_CONFLICT=true|false and requires an authenticated gh CLI.
+# FM_SYNC_UPSTREAM_SHA, FM_SYNC_UPSTREAM_REPOSITORY, and FM_SYNC_MODE. It
+# accepts FM_SYNC_CONFLICT=true|false and requires an authenticated gh CLI.
 #
 # Usage:
 #   fm-upstream-sync.sh prepare
@@ -78,7 +78,8 @@ trailer_value() {
 commit_managed_marker() {
   subject=$1
   conflict=$2
-  allow_empty=${3:-false}
+  mode=$3
+  allow_empty=${4:-false}
   set -- git -c user.name='Firstmate upstream sync' \
     -c user.email='actions@users.noreply.github.com' commit
   if [ "$allow_empty" = true ]; then
@@ -89,7 +90,8 @@ commit_managed_marker() {
 Upstream-Sync-Managed: true
 Upstream-Sync-Base: $base_sha
 Upstream-Sync-Head: $upstream_sha
-Upstream-Sync-Conflict: $conflict"
+Upstream-Sync-Conflict: $conflict
+Upstream-Sync-Mode: $mode"
 }
 
 prepare() {
@@ -150,6 +152,7 @@ prepare() {
     write_output has_delta false
     write_output branch_updated false
     write_output conflict false
+    write_output mode none
     printf 'upstream-sync: no upstream delta\n'
     return 0
   fi
@@ -166,17 +169,26 @@ prepare() {
     existing_base=$(trailer_value "$existing_sha" Upstream-Sync-Base)
     existing_upstream=$(trailer_value "$existing_sha" Upstream-Sync-Head)
     existing_conflict=$(trailer_value "$existing_sha" Upstream-Sync-Conflict)
+    existing_mode=$(trailer_value "$existing_sha" Upstream-Sync-Mode)
     assert_no_private_paths "$existing_sha"
     existing_agents_match=true
     if ! git diff --quiet "$existing_sha" "$upstream_sha" -- AGENTS.md; then
       existing_agents_match=false
     fi
+    existing_mode_valid=false
+    case "$existing_mode:$existing_conflict:$upstream_is_ancestor" in
+      agents-correction:false:true|merge:false:false|conflict:true:false)
+        existing_mode_valid=true
+        ;;
+    esac
     if [ "$existing_base" = "$base_sha" ] && \
         [ "$existing_upstream" = "$upstream_sha" ] && \
-        [ "$existing_agents_match" = true ]; then
+        [ "$existing_agents_match" = true ] && \
+        [ "$existing_mode_valid" = true ]; then
       write_output has_delta true
       write_output branch_updated false
       write_output conflict "${existing_conflict:-false}"
+      write_output mode "$existing_mode"
       printf 'upstream-sync: branch already represents current fork and upstream heads\n'
       return 0
     fi
@@ -185,26 +197,29 @@ prepare() {
   git checkout --detach "$base_sha"
   conflict=false
   if [ "$upstream_is_ancestor" = true ]; then
+    mode=agents-correction
     git checkout "$upstream_sha" -- AGENTS.md
     git diff --quiet "$upstream_sha" -- AGENTS.md || \
       die "generated branch did not retain upstream AGENTS.md"
-    commit_managed_marker 'chore: restore upstream AGENTS.md' false
+    commit_managed_marker 'chore: restore upstream AGENTS.md' false "$mode"
   elif git -c user.name='Firstmate upstream sync' \
       -c user.email='actions@users.noreply.github.com' \
       merge --no-ff --no-commit "$upstream_sha"; then
+    mode=merge
     git checkout "$upstream_sha" -- AGENTS.md
     git diff --quiet "$upstream_sha" -- AGENTS.md || \
       die "generated branch did not retain upstream AGENTS.md"
-    commit_managed_marker 'chore: sync fork with upstream' false
+    commit_managed_marker 'chore: sync fork with upstream' false "$mode"
   else
     if [ -z "$(git ls-files -u)" ]; then
       git merge --abort >/dev/null 2>&1 || true
       die "upstream merge failed without reviewable conflicts"
     fi
     conflict=true
+    mode=conflict
     git merge --abort
     git checkout --detach "$upstream_sha"
-    commit_managed_marker 'chore: stage conflicting upstream sync for review' true true
+    commit_managed_marker 'chore: stage conflicting upstream sync for review' true "$mode" true
   fi
 
   generated_sha=$(git rev-parse HEAD)
@@ -218,6 +233,7 @@ prepare() {
   write_output has_delta true
   write_output branch_updated true
   write_output conflict "$conflict"
+  write_output mode "$mode"
   write_output generated_sha "$generated_sha"
   printf 'upstream-sync: fork branch %s updated (conflict=%s)\n' "$sync_branch" "$conflict"
 }
@@ -231,11 +247,13 @@ upsert_pr() {
   upstream_sha=${FM_SYNC_UPSTREAM_SHA:-}
   upstream_repository=${FM_SYNC_UPSTREAM_REPOSITORY:-}
   conflict=${FM_SYNC_CONFLICT:-false}
+  mode=${FM_SYNC_MODE:-}
 
   [ -n "$repository" ] || die "FM_SYNC_REPOSITORY is required"
   [ -n "$base_sha" ] || die "FM_SYNC_BASE_SHA is required"
   [ -n "$upstream_sha" ] || die "FM_SYNC_UPSTREAM_SHA is required"
   [ -n "$upstream_repository" ] || die "FM_SYNC_UPSTREAM_REPOSITORY is required"
+  [ -n "$mode" ] || die "FM_SYNC_MODE is required"
   case "$repository" in
     */*) repository_owner=${repository%%/*} ;;
     *) die "FM_SYNC_REPOSITORY must be owner/name" ;;
@@ -243,18 +261,21 @@ upsert_pr() {
   case "$repository_owner" in
     ''|*[!A-Za-z0-9-]*) die "FM_SYNC_REPOSITORY owner is invalid" ;;
   esac
-  case "$conflict" in
-    true|false) : ;;
-    *) die "FM_SYNC_CONFLICT must be true or false" ;;
+  case "$mode:$conflict" in
+    conflict:true)
+      title='chore: sync fork with upstream (conflicts require review)'
+      conflict_note='Git reported conflicts. The branch carries the upstream tree so GitHub can expose the conflicting paths for human resolution.'
+      ;;
+    agents-correction:false)
+      title='chore: restore upstream AGENTS.md'
+      conflict_note='Git produced a one-parent correction commit that restores AGENTS.md from the recorded upstream head.'
+      ;;
+    merge:false)
+      title='chore: sync fork with upstream'
+      conflict_note='Git produced a clean two-parent merge commit for review.'
+      ;;
+    *) die "FM_SYNC_MODE and FM_SYNC_CONFLICT are inconsistent" ;;
   esac
-
-  if [ "$conflict" = true ]; then
-    title='chore: sync fork with upstream (conflicts require review)'
-    conflict_note='Git reported conflicts. The branch carries the upstream tree so GitHub can expose the conflicting paths for human resolution.'
-  else
-    title='chore: sync fork with upstream'
-    conflict_note='Git produced a clean two-parent merge commit for review.'
-  fi
 
   body_file=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/firstmate-upstream-sync.XXXXXX")
   trap 'rm -f "$body_file"' EXIT HUP INT TERM
@@ -270,9 +291,10 @@ upsert_pr() {
     printf "Do not add fork-private \`data/\`, \`state/\`, \`config/\`, \`projects/\`, or \`.no-mistakes/\` content.\n"
   } > "$body_file"
 
-  pr_number=$(gh pr list --repo "$repository" --state open --base "$base_branch" \
-    --head "$sync_branch" --json number,headRepositoryOwner \
-    --jq "first(.[] | select(.headRepositoryOwner.login == \"$repository_owner\") | .number) // empty")
+  pr_number=$(gh api --method GET "repos/$repository/pulls" \
+    -f state=open -f base="$base_branch" \
+    -f "head=$repository_owner:$sync_branch" \
+    --jq '.[0].number // empty')
   if [ -n "$pr_number" ]; then
     gh pr edit "$pr_number" --repo "$repository" --title "$title" --body-file "$body_file"
   else
