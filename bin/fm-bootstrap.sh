@@ -599,6 +599,7 @@ done
 for t in $COMMON_TOOLS; do
   command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
 done
+tasks_axi_compatible=0
 # The treehouse lease-support upgrade check is only relevant when the resolved
 # backend actually requires treehouse (every backend except orca, which owns its
 # own worktrees); an orca home must not be told to upgrade a provider it never uses.
@@ -609,8 +610,12 @@ fi
 if command -v no-mistakes >/dev/null 2>&1 && ! no_mistakes_compatible; then
   echo "MISSING: no-mistakes (install: $(install_cmd no-mistakes))"
 fi
-if command -v tasks-axi >/dev/null 2>&1 && ! fm_tasks_axi_compatible; then
-  echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+if command -v tasks-axi >/dev/null 2>&1; then
+  if fm_tasks_axi_compatible; then
+    tasks_axi_compatible=1
+  else
+    echo "MISSING: tasks-axi (install: $(install_cmd tasks-axi))"
+  fi
 fi
 gh auth status >/dev/null 2>&1 || echo "NEEDS_GH_AUTH"
 # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
@@ -629,7 +634,7 @@ crew=
 [ -f "$CONFIG/crew-harness" ] && crew=$(tr -d '[:space:]' < "$CONFIG/crew-harness" || true)
 [ -n "$crew" ] && [ "$crew" != "default" ] && echo "CREW_HARNESS_OVERRIDE: $crew"
 crew_dispatch_validate
-if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
+if ! fm_backlog_backend_manual "$CONFIG" && [ "$tasks_axi_compatible" -eq 1 ]; then
   echo "TASKS_AXI: available"
 fi
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
