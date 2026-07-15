@@ -1,0 +1,68 @@
+name: Upstream sync PR
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync-pr
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Open or refresh upstream sync PR
+    if: github.event.repository.fork == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve fork and upstream branches
+        id: repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          fork_default=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.default_branch')
+          upstream_repository=$(gh api "repos/$GITHUB_REPOSITORY" --jq '.source.full_name // .parent.full_name // empty')
+          [ -n "$upstream_repository" ] || {
+            echo "::error::repository is not attached to an upstream source"
+            exit 1
+          }
+          upstream_default=$(gh api "repos/$upstream_repository" --jq '.default_branch')
+          git remote remove upstream >/dev/null 2>&1 || true
+          git remote add upstream "https://github.com/$upstream_repository.git"
+          git remote set-url --push upstream DISABLED
+          {
+            echo "fork_default=$fork_default"
+            echo "upstream_repository=$upstream_repository"
+            echo "upstream_default=$upstream_default"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare fork-only review branch
+        id: prepare
+        env:
+          FM_SYNC_BASE_BRANCH: ${{ steps.repository.outputs.fork_default }}
+          FM_SYNC_UPSTREAM_BRANCH: ${{ steps.repository.outputs.upstream_default }}
+          FM_SYNC_BRANCH: automation/upstream-sync
+        run: bin/fm-upstream-sync.sh prepare
+
+      - name: Open or refresh review PR
+        if: steps.prepare.outputs.has_delta == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FM_SYNC_REPOSITORY: ${{ github.repository }}
+          FM_SYNC_BASE_BRANCH: ${{ steps.repository.outputs.fork_default }}
+          FM_SYNC_BRANCH: ${{ steps.prepare.outputs.branch }}
+          FM_SYNC_BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
+          FM_SYNC_UPSTREAM_SHA: ${{ steps.prepare.outputs.upstream_sha }}
+          FM_SYNC_UPSTREAM_REPOSITORY: ${{ steps.repository.outputs.upstream_repository }}
+          FM_SYNC_CONFLICT: ${{ steps.prepare.outputs.conflict }}
+        run: bin/fm-upstream-sync.sh upsert-pr
