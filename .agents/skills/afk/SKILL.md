@@ -60,7 +60,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **without** the sentinel marker and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-launch.sh stop`: it stops the daemon in the correct order - it SIGTERMs the daemon so its shutdown flush runs **while `state/.afk` is still present** (clearing the flag first makes that flush a no-op via the daemon's presence gate, stranding undelivered escalations), then closes the daemon's own terminal by exact id, then clears `state/.afk` last.
   Then flush one distilled "while you were out" catch-up (drain `state/.wake-queue`, summarize any pending escalations from `state/.subsuper-escalations` and any `state/.subsuper-inject-wedged` marker), and resume full per-wake responsiveness through the emitted primary-harness supervision protocol from session start.
-- A message **with** the sentinel marker (`FM_INJECT_MARK`, ASCII 0x1f) -> it
+- A message **with** the sentinel marker (`FM_INJECT_MARK`, defined in `bin/fm-supervise-daemon.sh`) -> it
   is a daemon escalation; stay afk and process it.
 - Re-invoking `/afk` while already away -> stay afk (refresh the flag); this
   does **not** trigger an exit.
@@ -77,12 +77,10 @@ explicit word - the daemon just batches the notification.
 
 ## Sentinel marker contract
 
-The daemon prefixes every injection with `FM_INJECT_MARK` (ASCII unit
-separator, 0x1f), invisible and untypable. This is how firstmate tells a
-daemon escalation apart from a real message in the same pane. The marker
-travels with the message text; it does not rely on harness-level
-typed-vs-injected detection (which is not portable across claude, codex,
-opencode, pi, and grok).
+The daemon owns `FM_INJECT_MARK` in `bin/fm-supervise-daemon.sh`.
+It prefixes every injection so firstmate can distinguish a daemon escalation
+from a real message in the same pane without relying on harness-level typed-vs-
+injected detection.
 
 ## Busy-guard and composer guard
 
