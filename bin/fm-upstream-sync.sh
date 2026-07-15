@@ -2,12 +2,13 @@
 # fm-upstream-sync.sh - prepare and maintain a review-only fork sync PR.
 #
 # The prepare command fetches the fork and its upstream, then updates one
-# automation-owned branch on the fork. A clean sync is represented by an
-# explicit merge commit whose first parent is the fork base and whose second
-# parent is the upstream head. If git reports conflicts, the branch carries the
-# upstream tree plus an empty managed marker commit so GitHub can expose the
-# conflict against the fork base for human resolution. AGENTS.md always comes
-# from upstream, and tracked fleet-private paths are refused.
+# automation-owned branch on the fork. A clean upstream commit delta is
+# represented by an explicit merge commit whose first parent is the fork base
+# and whose second parent is the upstream head. Fork-only AGENTS.md drift is
+# represented by a one-parent correction commit. If git reports conflicts, the
+# branch carries the upstream tree plus an empty managed marker commit so GitHub
+# can expose the conflict against the fork base for human resolution. AGENTS.md
+# always comes from upstream, and tracked fleet-private paths are refused.
 #
 # The upsert-pr command opens one PR or refreshes the existing open PR for the
 # automation branch. It never enables auto-merge and never merges a PR.
