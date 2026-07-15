@@ -46,9 +46,9 @@
 #          no-mistakes is also MISSING when its installed version is older than
 #          1.31.2.
 #          tasks-axi and quota-axi are required bootstrap tools (same class as
-#          lavish-axi). tasks-axi is also version and feature gated (0.1.1+
-#          with update --archive-body and mv [<id>...]); an installed but incompatible build
-#          reports MISSING like no-mistakes. When
+#          lavish-axi). tasks-axi runs one shared live compatibility probe for
+#          recoverable body updates and atomic multi-ID handoffs; an installed
+#          but incompatible build reports MISSING like no-mistakes. When
 #          config/backlog-backend is not manual and tasks-axi is compatible,
 #          bootstrap prints TASKS_AXI: available. quota-axi is required because
 #          crew-dispatch quota-balanced may call it; fm-dispatch-select.sh still
@@ -318,7 +318,8 @@ install_cmd() {
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
     gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    tasks-axi) echo "npm install -g tasks-axi@0.2.3" ;;
+    quota-axi) echo "npm install -g quota-axi" ;;
     *) return 1 ;;
   esac
 }
