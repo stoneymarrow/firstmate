@@ -14,6 +14,14 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# fm-brief.sh intentionally lets these explicit overrides take precedence over
+# FM_HOME, but they may be inherited from the primary session running this
+# suite. Clear them so each fixture proves FM_HOME isolation without creating
+# a colliding brief in the primary home or using primary-root helpers.
+unset FM_ROOT_OVERRIDE
+unset FM_DATA_OVERRIDE
+unset FM_STATE_OVERRIDE
+
 TMP_ROOT=$(fm_test_tmproot fm-brief)
 
 # The script itself must always parse. This is the direct regression test for
@@ -64,6 +72,29 @@ test_ship_modes_generate_clean_briefs() {
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_faster_paths_use_configured_authority_without_stacked_review() {
+  local home id brief
+  home="$TMP_ROOT/configured-authority-home"
+  write_registry "$home"
+  id="brief-direct-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+    "direct-PR brief lost configured merge authority"
+  assert_no_grep "The captain reviews and merges the PR" "$brief" \
+    "direct-PR brief hard-coded captain-only authority"
+  id="brief-local-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+    "local-only brief lost configured merge authority and guarded landing"
+  assert_no_grep "The captain approves the ready branch" "$brief" \
+    "local-only brief hard-coded captain-only authority"
+  assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
+    "local-only brief retained a personal review stacked on the selected delivery path"
+  pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -168,6 +199,64 @@ test_herdr_lab_omission_is_loud_for_ship_and_scout() {
   pass "fm-brief.sh: ship and scout scaffolds make omitted Herdr intent fail-visible"
 }
 
+test_parallelism_section_renders_in_isolated_ship_and_scout_briefs() {
+  local home kind id brief
+
+  for kind in ship scout; do
+    home="$TMP_ROOT/parallelism-$kind-home"
+    id="brief-parallelism-$kind-e1"
+    mkdir -p "$home/data"
+
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind parallelism brief was not isolated under FM_HOME"
+    assert_grep "# Parallelism" "$brief" "$kind brief missing Parallelism section"
+    assert_grep "Keep at most roughly six concurrent subagents" "$brief" \
+      "$kind brief missing the concurrent-subagent cap"
+    assert_grep "Do not assume subagents inherit this brief" "$brief" \
+      "$kind brief assumes unverified subagent context inheritance"
+    assert_grep "repeat the applicable task, worktree, push/merge, allowed-path and output-path, status-file ownership, topology, and safety constraints" "$brief" \
+      "$kind brief missing explicit subagent-prompt safety propagation"
+    assert_grep "subagents never touch the status file" "$brief" \
+      "$kind brief missing single-owner status containment"
+    assert_grep "NEVER spawn additional crewmates or firstmate tasks" "$brief" \
+      "$kind brief missing firstmate topology containment"
+    assert_no_grep "Subagents inherit ALL your rules" "$brief" \
+      "$kind brief retained the unverified inheritance claim"
+    assert_no_grep "prompt inheritance is verified to place the complete Herdr safety contract" "$brief" \
+      "$kind unguarded brief gained Herdr-lab parallelism instructions"
+  done
+
+  pass "fm-brief.sh: isolated ship and scout briefs render the Parallelism contract"
+}
+
+test_herdr_lab_parallelism_guard_renders_for_ship_and_scout() {
+  local home kind id brief
+
+  home="$TMP_ROOT/herdr-parallelism-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-herdr-parallelism-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --herdr-lab >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --herdr-lab >/dev/null 2>&1
+    fi
+
+    brief="$home/data/$id/brief.md"
+    assert_grep "do not use subagents unless prompt inheritance is verified to place the complete Herdr safety contract above in every subagent prompt" "$brief" \
+      "$kind Herdr-lab brief missing the subagent safety gate"
+  done
+
+  pass "fm-brief.sh: ship and scout Herdr-lab briefs gate subagent use"
+}
+
 test_secondmate_no_projects_charter() {
   local home brief status
   home="$TMP_ROOT/no-projects-home"
@@ -188,6 +277,12 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
+  assert_grep 'working [key=<work-slug>]' "$brief" \
+    "secondmate charter did not key material routed-work phases"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter did not close a quietly ended routed-work phase"
+  assert_grep 'use the same key on its later' "$brief" \
+    "secondmate charter did not supersede working phases with later states"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
   fi
@@ -260,14 +355,37 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_scout_and_secondmate_load_decision_hold_policy() {
+  local home scout charter
+  home="$TMP_ROOT/decision-policy-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-investigation/brief.md"
+  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
+    "scout brief did not load the unresolved-decision policy before done"
+  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
+    "scout brief did not cross-reference visual-review completion"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
+    "secondmate charter did not load the shared decision policy for detailed investigations"
+  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
+test_parallelism_section_renders_in_isolated_ship_and_scout_briefs
+test_herdr_lab_parallelism_guard_renders_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_scout_and_secondmate_load_decision_hold_policy
