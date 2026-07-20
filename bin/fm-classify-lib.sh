@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared wake classifier: the common source of truth for captain-relevant status
-# tests, declared-external-wait vocabulary, and the working/paused absorb
-# classification that makes no-verb signal and stale-pane wakes safe to absorb.
+# tests, declared-external-wait vocabulary, and the working/idle-wait
+# classification used in no-verb signal and stale-pane triage.
 # Sourced by BOTH the always-on watcher
 # (bin/fm-watch.sh) and the away-mode daemon (bin/fm-supervise-daemon.sh) so the
 # overlapping triage policy lives in one place instead of two copies that can
@@ -17,9 +17,9 @@
 # working/paused wrappers). It is NOT a pure status-file read: it reuses
 # bin/fm-crew-state.sh, which may make a bounded no-mistakes call, to decide
 # whether a crew that just stopped its turn or went stale is working, deliberately
-# paused, or neither. Callers run it ONLY on no-verb signal handling and first
-# sighting of a stale hash, never on every wake, so the per-wake triage stays
-# cheap.
+# paused, monitoring a checks-green PR, or none of those. Callers run it ONLY on
+# no-verb signal handling and first sighting of a stale hash, never on every wake,
+# so the per-wake triage stays cheap.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -51,18 +51,22 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared pause. Far longer than the wedge
+# Bounded re-surface cadence for a legitimate idle wait. Far longer than the wedge
 # threshold (FM_STALE_ESCALATE_SECS, default 240s) so a deliberate wait is not
-# nagged like a wedge, yet finite so a forgotten pause cannot rot invisibly - it
-# re-surfaces once for a recheck every window. One hour by default; both consumers
-# read FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner.
+# nagged like a wedge, yet finite so it cannot rot invisibly - it re-surfaces once
+# for a recheck every window. One hour by default; both consumers read
+# FM_PAUSE_RESURFACE_SECS with this default so the cadence has one owner, although
+# the away-mode daemon currently applies it only to declared pauses and the
+# normal-mode watcher also applies it to a dead-agent captain hold.
 # shellcheck disable=SC2034 # Read by the watcher and daemon (fm-watch.sh, fm-supervise-daemon.sh), not this lib.
 FM_PAUSE_RESURFACE_SECS_DEFAULT=3600
 
-# The resolution verb that CLOSES a keyed decision opened by needs-decision or
-# blocked. See status_open_decisions below for the full durable-decision contract;
-# this is the one owner of the verb literal, overridable via FM_CLASSIFY_RESOLVE_VERB.
+# The resolution verb and durable-backlog-transfer verb that CLOSE a keyed
+# status decision opened by needs-decision or blocked. See status_open_decisions
+# below for the status-fold contract. The transfer verb is written only after
+# fm-decision-hold.sh has verified the corresponding captain-held backlog item.
 FM_CLASSIFY_RESOLVE_VERB_DEFAULT='resolved'
+FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 
 # Return the last non-blank line of a status file (empty if missing/blank).
 last_status_line() {
@@ -96,15 +100,29 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
+# 0 if a status line declares either an external-wait pause or a verified
+# captain-held transfer.
+# Both declarations can intentionally leave an exited crew's endpoint idle, so
+# the watcher applies its bounded pause cadence when agent death confirms that
+# no live decision gate is being silenced.
+status_is_paused_or_captain_held() {  # <status-line>
+  local line=$1 verb
+  status_is_paused "$line" && return 0
+  [ -n "$line" ] || return 1
+  verb=$(status_line_verb "$line")
+  [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
+}
+
 # --- durable keyed decisions ------------------------------------------------
 #
 # The status stream is an append-only EVENT log. Reading it last-event-wins
 # (last_status_line above) cannot represent "an earlier decision is still open
 # after a later, unrelated event": a subsequent done/paused/working line silently
 # masks a still-open needs-decision. status_open_decisions is the ONE authoritative
-# statement of the contract that fixes this - a needs-decision/blocked line OPENS a
-# keyed decision, and ONLY an explicit resolution referencing that key CLOSES it; a
-# later unrelated terminal line never clears an open captain decision.
+# statement of the status-fold contract that fixes this - a needs-decision/blocked
+# line OPENS a keyed decision, and only an explicit resolution or a verified
+# captain-held backlog transfer referencing that key CLOSES it; a later unrelated
+# terminal line never clears an open captain decision.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
 # format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
@@ -163,9 +181,10 @@ EOF
 # is the durable open-set the fleet snapshot and any point-in-time consumer must use
 # instead of trusting the last status line.
 status_open_decisions() {  # <status-file>
-  local f=$1 line verb key note resolve open='' stripped
+  local f=$1 line verb key note resolve held open='' stripped
   [ -f "$f" ] || return 0
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
@@ -178,13 +197,58 @@ status_open_decisions() {  # <status-file>
         [ -n "$open" ] && open="${open}"$'\n'
         open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
         ;;
-      "$resolve")
+      "$resolve"|"$held")
         open=$(_fm_decision_drop "$open" "$key")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac
   done < "$f"
   printf '%s' "$open"
+}
+
+# Fold material routed-work phases in the same keyed event stream.
+# A working or declared-pause event opens or replaces one phase for its key.
+# A later done, failed, needs-decision, blocked, or resolved event carrying that
+# key closes the phase, because it has moved to a terminal or separately tracked
+# state.
+# A bare legacy event uses the default key, preserving one-phase behavior.
+# This fold is evidence about whether a parent event was explicitly superseded.
+# It is never authoritative current crew state, and consumers must not let an open
+# phase outrank a structured home snapshot or fm-crew-state result.
+_fm_status_open_activities_stream() {
+  local line verb key note resolve held open='' stripped pause
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
+  while IFS= read -r line || [ -n "$line" ]; do
+    stripped=${line//[[:space:]]/}
+    [ -n "$stripped" ] || continue
+    verb=$(status_line_verb "$line")
+    key=$(_fm_decision_key "$line") || continue
+    case "$verb" in
+      working|"$pause")
+        note=$(status_line_note "$line")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        ;;
+      done|failed|needs-decision|blocked|"$resolve"|"$held")
+        open=$(_fm_decision_drop "$open" "$key")
+        [ -n "$open" ] && open="${open}"$'\n'
+        ;;
+    esac
+  done
+  printf '%s' "$open"
+}
+
+status_open_activities() {  # <status-file-or-dash>
+  local f=$1
+  if [ "$f" = - ]; then
+    _fm_status_open_activities_stream
+    return 0
+  fi
+  [ -f "$f" ] || return 0
+  _fm_status_open_activities_stream < "$f"
 }
 
 # task id from a recorded window target, falling back to the tmux-shaped
@@ -230,26 +294,42 @@ signal_reason_is_actionable() {  # <file> ...
 #   working - an actively-running no-mistakes step (running/fixing/ci) or a busy
 #             pane; the crew is legitimately mid-work on a static-looking pane
 #             (e.g. waiting on CI);
-#   paused  - the crew's authoritative current state is a declared external-wait
-#             pause (paused:), which is EXPECTED to idle;
+#   paused  - the status log's trailing verb declares an external wait, and no
+#             active run or busy pane supersedes it;
+#   merge-wait - checks are green and the run is terminal-done only because it
+#             is monitoring the PR for merge/close;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
 #             torn-down/unknown crew, or an unreadable verdict).
-# One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
-# authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# One fm-crew-state.sh read serves every absorb class at once. Reading the state
+# authoritatively is what keeps active-work precedence: a crew that appended
+# paused: but then STARTED a run reports working, while a terminal run no longer
+# masks the trailing pause declaration.
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src status_dir last
   [ -n "$id" ] || { printf 'none'; return; }
   line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
-  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  src=${line#*source: }; src=${src%% *}
   if [ "$state" = working ]; then
-    src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
+  fi
+  if [ "$state" = paused ]; then printf 'paused'; return; fi
+  status_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+  if [ -n "$status_dir" ]; then
+    last=$(last_status_line "$status_dir/$id.status")
+    if status_is_paused "$last" && [ "$state:$src:${line##* · }" = "failed:run-step:run cancelled" ]; then
+      printf 'paused'
+      return
+    fi
+  fi
+  if [ "$state" = "done" ] && [ "$src" = run-step ]; then
+    case "$line" in
+      *"(still monitoring for merge/close)") printf 'merge-wait'; return ;;
+    esac
   fi
   printf 'none'
 }
@@ -260,7 +340,7 @@ crew_absorb_class() {  # <id>
 # ONLY when this returns 0, and SURFACED otherwise (the crew may be done, waiting
 # on a decision, or wedged). For stale panes it is checked before trusting the
 # status log so a pre-validation captain-relevant line does not override an active
-# run. See crew_absorb_class for the exact working/paused/none decision.
+# run. See crew_absorb_class for the exact decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
