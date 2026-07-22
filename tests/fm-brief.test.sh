@@ -15,20 +15,30 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-brief)
+BRIEF_HOME="$TMP_ROOT/home"
+mkdir -p "$BRIEF_HOME/data"
 
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies
 # (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
 test_script_parses() {
-  bash -n "$ROOT/bin/fm-brief.sh" 2>&1 || fail "bin/fm-brief.sh fails bash -n (heredoc/quote regression)"
+  local out rc
+  out=$(bash -n "$ROOT/bin/fm-brief.sh" 2>&1); rc=$?
+  expect_code 0 "$rc" "bash -n bin/fm-brief.sh must parse cleanly (got: $out)"
+  [ -z "$out" ] || fail "bash -n bin/fm-brief.sh emitted unexpected output: $out"
   pass "fm-brief.sh: bash -n succeeds"
 }
 
 test_help_includes_entire_header() {
-  local help
-  help=$("$ROOT/bin/fm-brief.sh" --help)
+  local help status=0
+  help=$("$ROOT/bin/fm-brief.sh" --help 2>&1) || status=$?
+  expect_code 0 "$status" "fm-brief.sh --help"
+  assert_contains "$help" "[--guideline '<text>']" \
+    "fm-brief.sh --help omitted --guideline from usage"
+  assert_contains "$help" "--guideline '<text>' adds task-specific advisory guidance" \
+    "fm-brief.sh --help omitted --guideline documentation"
   assert_contains "$help" "Refuses to overwrite an existing brief." "fm-brief.sh --help omitted its header terminator"
-  pass "fm-brief.sh: --help renders the complete header"
+  pass "fm-brief.sh: --help includes the complete header"
 }
 
 # Registry with one project per delivery mode, so each ship-mode DOD branch is
@@ -61,9 +71,34 @@ test_ship_modes_generate_clean_briefs() {
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
+      "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
   done
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
+}
+
+test_faster_paths_use_configured_authority_without_stacked_review() {
+  local home id brief
+  home="$TMP_ROOT/configured-authority-home"
+  write_registry "$home"
+  id="brief-direct-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" direct-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
+    "direct-PR brief lost configured merge authority"
+  assert_no_grep "The captain reviews and merges the PR" "$brief" \
+    "direct-PR brief hard-coded captain-only authority"
+  id="brief-local-authority-a4"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_grep "The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path." "$brief" \
+    "local-only brief lost configured merge authority and guarded landing"
+  assert_no_grep "The captain approves the ready branch" "$brief" \
+    "local-only brief hard-coded captain-only authority"
+  assert_no_grep "Firstmate then reviews your branch diff" "$brief" \
+    "local-only brief retained a personal review stacked on the selected delivery path"
+  pass "fm-brief.sh: faster paths use configured authority without stacked review"
 }
 
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
@@ -78,6 +113,12 @@ test_no_mistakes_dod_wording() {
   assert_present "$brief" "brief was not scaffolded"
   assert_grep "no-mistakes itself provides for the mechanics" "$brief" \
     "no-mistakes DOD lost its guidance-reference sentence"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`no-mistakes axi run --help`' "$brief" \
+    "no-mistakes DOD must render literal backticks around the help command"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep '`help`' "$brief" \
+    "no-mistakes DOD must render literal backticks around help"
   assert_no_grep "no-mistakes' own guidance" "$brief" \
     "no-mistakes DOD regressed to the apostrophe form that breaks bash -n"
   pass "fm-brief.sh: no-mistakes DOD wording avoids the apostrophe regression"
@@ -98,6 +139,98 @@ test_ship_project_memory_wording() {
   assert_grep "lacks \`## Maintaining this file\`, add that short self-governance section" "$brief" \
     "project-memory contract lost the self-governance add-in-same-pass rule"
   pass "fm-brief.sh: ship project-memory wording carries the AGENTS.md authoring bar"
+}
+
+test_guidelines_default_for_ship_and_scout() {
+  local home id brief
+  home="$TMP_ROOT/guidelines-default-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-guideline-default-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "# Rules" "$brief" "$kind brief lost the Rules section"
+    assert_grep "## Guidelines" "$brief" "$kind brief missing the guidelines block"
+    assert_grep "Expected waiting on a validation run or long test suite does not count as a no-phase-change stretch." "$brief" \
+      "$kind brief treats healthy validation waiting as reaching the guideline"
+    assert_grep "If roughly two hours or 50 significant actions pass without a supervisor-actionable phase change" "$brief" \
+      "$kind brief missing the default action and time guideline"
+    assert_grep "blocked: guideline - {one-line progress + what remains}" "$brief" \
+      "$kind brief missing the guideline status protocol"
+    assert_grep "blocked: scope - {one-line progress + newly discovered work}" "$brief" \
+      "$kind brief missing the scope-expansion guideline"
+    assert_grep "# Definition of done" "$brief" "$kind brief lost the Definition of done section"
+    assert_no_grep "Task-specific guideline:" "$brief" "$kind brief rendered task-specific guidance without --guideline"
+  done
+  pass "fm-brief.sh: ship and scout briefs include the standard guidelines"
+}
+
+test_task_specific_guideline_for_ship_and_scout() {
+  local home id brief guideline
+  home="$TMP_ROOT/task-specific-guideline-home"
+  guideline="check in after 30 minutes"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-task-guideline-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --guideline "$guideline" >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline "$guideline" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "Task-specific guideline: $guideline" "$brief" "$kind brief omitted its --guideline text"
+    assert_grep "Treat this as advisory guidance alongside the standard guidelines." "$brief" \
+      "$kind brief did not describe --guideline as advisory"
+    assert_grep "blocked: guideline - {one-line progress + what remains}" "$brief" \
+      "$kind brief lost the guideline status protocol"
+  done
+  pass "fm-brief.sh: --guideline renders as advisory guidance in ship and scout briefs"
+}
+
+test_guideline_rejects_recognized_option_as_value() {
+  local home id brief option status output
+  home="$TMP_ROOT/guideline-option-home"
+  mkdir -p "$home/data"
+
+  for option in -h --help --scout --secondmate --herdr-lab --no-projects --guideline; do
+    id="brief-guideline-option-${option//-/}"
+    status=0
+    output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline "$option" 2>&1) || status=$?
+    expect_code 1 "$status" "--guideline must reject $option as a missing value"
+    assert_contains "$output" "error: --guideline requires non-empty text" \
+      "--guideline $option returned the wrong error"
+    brief="$home/data/$id/brief.md"
+    assert_absent "$brief" "--guideline $option still scaffolded a brief"
+  done
+  pass "fm-brief.sh: --guideline rejects recognized options as its value"
+}
+
+test_ship_and_scout_reject_excess_positionals() {
+  local home id brief kind status output
+  home="$TMP_ROOT/excess-positionals-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="brief-excess-positionals-$kind"
+    status=0
+    if [ "$kind" = scout ]; then
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --guideline check in after 30 minutes 2>&1) || status=$?
+    else
+      output=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --guideline check in after 30 minutes 2>&1) || status=$?
+    fi
+    expect_code 1 "$status" "$kind brief must reject excess positional arguments"
+    assert_contains "$output" "error: ship and scout briefs accept only <task-id> and <repo-name> as positional arguments" \
+      "$kind brief returned the wrong excess-positionals error"
+    brief="$home/data/$id/brief.md"
+    assert_absent "$brief" "$kind brief silently scaffolded with truncated unquoted guidance"
+  done
+  pass "fm-brief.sh: ship and scout briefs reject excess positional arguments"
 }
 
 test_herdr_lab_contract_is_explicit_and_complete() {
@@ -188,6 +321,12 @@ test_secondmate_no_projects_charter() {
     "project-less charter operating model lost the pooled-worktree note"
   assert_no_grep "The projects above are local clones" "$brief" \
     "project-less charter kept the with-projects operating-model line"
+  assert_grep 'working [key=<work-slug>]' "$brief" \
+    "secondmate charter did not key material routed-work phases"
+  assert_grep 'resolved [key=<work-slug>]' "$brief" \
+    "secondmate charter did not close a quietly ended routed-work phase"
+  assert_grep 'use the same key on its later' "$brief" \
+    "secondmate charter did not supersede working phases with later states"
   if grep -nE '^-[[:space:]]*$' "$brief" >/dev/null; then
     fail "project-less charter left a stray empty project bullet"
   fi
@@ -260,14 +399,60 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+test_scout_and_secondmate_load_decision_hold_policy() {
+  local home scout charter
+  home="$TMP_ROOT/decision-policy-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-investigation sample --scout >/dev/null 2>&1
+  scout="$home/data/sample-investigation/brief.md"
+  assert_grep "$ROOT/.agents/skills/decision-hold-lifecycle/SKILL.md" "$scout" \
+    "scout brief did not load the unresolved-decision policy before done"
+  assert_grep "pass its shared completion gate for the report and any visual review" "$scout" \
+    "scout brief did not cross-reference visual-review completion"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample reviews' \
+    "$ROOT/bin/fm-brief.sh" sample-mate --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/sample-mate/brief.md"
+  assert_grep "load \`decision-hold-lifecycle\`" "$charter" \
+    "secondmate charter did not load the shared decision policy for detailed investigations"
+  pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
+}
+
+# Scout and secondmate paths still scaffold well-formed briefs.
+test_scout_and_secondmate_scaffold() {
+  local brief
+  FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh scout scaffold exited non-zero"
+  brief="$BRIEF_HOME/data/brief-scout-q6/brief.md"
+  assert_present "$brief" "scout brief was not scaffolded"
+  assert_grep "SCOUT task" "$brief" "scout brief must declare itself a scout task"
+  assert_grep "report.md" "$brief" "scout brief must point at the report deliverable"
+
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' \
+    FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-sm-q6 --secondmate alpha >/dev/null 2>&1 \
+    || fail "fm-brief.sh secondmate scaffold exited non-zero"
+  brief="$BRIEF_HOME/data/brief-sm-q6/brief.md"
+  assert_present "$brief" "secondmate charter was not scaffolded"
+  assert_grep "persistent second mate" "$brief" \
+    "secondmate charter must declare its role"
+  pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
 test_ship_project_memory_wording
+test_guidelines_default_for_ship_and_scout
+test_task_specific_guideline_for_ship_and_scout
+test_guideline_rejects_recognized_option_as_value
+test_ship_and_scout_reject_excess_positionals
 test_herdr_lab_contract_is_explicit_and_complete
 test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_pause_verb_override_renders_all_brief_scaffolds
+test_scout_and_secondmate_load_decision_hold_policy
+test_scout_and_secondmate_scaffold
