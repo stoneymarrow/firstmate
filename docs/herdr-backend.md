@@ -131,7 +131,8 @@ Operational compromises:
 
 - Grouping is best-effort; only an exact same-identity version 2 or version 3 binding survives a Herdr restart in place.
 - Existing layouts are not force-renamed or rearranged.
-- Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
+- Missing or ambiguous restart bindings select the ordinary home-workspace path while the old projection remains untouched.
+- Sustained presentation-lock contention also selects that flat path, but flat workspace or task creation requires the same named-session mutation lock and refuses until the contention clears.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
 - Spaces have no cross-home cleanup path, and a secondmate child can clean up only from its exact home.
 - Every stale-looking space outside that narrow startup proof still requires manual cleanup in Herdr's UI after human inspection.
@@ -139,6 +140,7 @@ Operational compromises:
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
+`tests/fm-spawn-herdr-recovery.test.sh` covers the real spawn entry point with a fake Herdr command for native/project separation, flat fallback, exact journal-parent refusal, and second-mate publication-crash recovery.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#per-home-and-presentation-topology) owns the active versioned evidence.
 
@@ -289,6 +291,7 @@ tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-labels.test.sh
 tests/fm-herdr-primary-labels.test.sh
+tests/fm-spawn-herdr-recovery.test.sh
 tests/fm-herdr-display-surfaces.test.sh
 tests/fm-promote-herdr.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
