@@ -150,7 +150,7 @@ CM1_WSID=$(meta_field_exact "$CM1_META" herdr_workspace_id) || fail "$WORKER_ID 
 CM1_TAB=$(meta_field_exact "$CM1_META" herdr_tab_id) || fail "$WORKER_ID metadata has no exact tab"
 CM1_PANE=$(meta_field_exact "$CM1_META" herdr_pane_id) || fail "$WORKER_ID metadata has no exact pane"
 assert_labels "$WORKER_ID" "$CM1_META" "$CM1_WSID" "$CM1_TAB" "$CM1_PANE" \
-  'payments · primary' 'invoice-check · worker'
+  'payments · project' 'invoice-check · worker'
 sleep 1
 CM1_CAPTURE=$(fm_backend_herdr_capture "$SESSION:$CM1_PANE" 30) \
   || fail "capture failed on the primary worker pane"
@@ -170,9 +170,9 @@ CM3_TAB=$(meta_field_exact "$CM3_META" herdr_tab_id) || fail "$SECOND_WORKER_ID 
 CM3_PANE=$(meta_field_exact "$CM3_META" herdr_pane_id) || fail "$SECOND_WORKER_ID metadata has no exact pane"
 [ "$CM3_WSID" != "$CM1_WSID" ] || fail "two primary projects shared one workspace"
 assert_labels "$SECOND_WORKER_ID" "$CM3_META" "$CM3_WSID" "$CM3_TAB" "$CM3_PANE" \
-  'inventory · primary' 'stock-check · worker'
+  'inventory · project' 'stock-check · worker'
 assert_labels "$WORKER_ID after project two" "$CM1_META" "$CM1_WSID" "$CM1_TAB" "$CM1_PANE" \
-  'payments · primary' 'invoice-check · worker'
+  'payments · project' 'invoice-check · worker'
 pass "real herdr E2E: two primary projects coexist without label churn"
 
 # --- 2. a second mate and its worker share one stable marked workspace -----
@@ -217,9 +217,9 @@ pass "real herdr E2E: a marked second-mate workspace stays stable for its worker
 fm_herdr_lab_stop "$SESSION" >/dev/null 2>&1 || fail "isolated Herdr restart stop failed"
 fm_backend_herdr_server_ensure "$SESSION" || fail "isolated Herdr restart failed"
 assert_labels "$WORKER_ID after restart" "$CM1_META" "$CM1_WSID" "$CM1_TAB" "$CM1_PANE" \
-  'payments · primary' 'invoice-check · worker'
+  'payments · project' 'invoice-check · worker'
 assert_labels "$SECOND_WORKER_ID after restart" "$CM3_META" "$CM3_WSID" "$CM3_TAB" "$CM3_PANE" \
-  'inventory · primary' 'stock-check · worker'
+  'inventory · project' 'stock-check · worker'
 assert_labels "second mate after restart" "$SM_META" "$SM_WSID" "$SM_TAB" "$SM_PANE" \
   "$SECOND_MATE_ID · second mate" "$SECOND_MATE_ID · second mate"
 

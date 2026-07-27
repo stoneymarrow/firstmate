@@ -197,7 +197,7 @@ last_nonempty_line() {  # <file>
 }
 
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
+  local id=$1 raw rest state source detail display_rest display_label display_target sep display_marker
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -218,7 +218,23 @@ crew_state_json() {  # <id>
       state=${rest%%"$sep"source: *}
       rest=${rest#*"$sep"source: }
       case "$rest" in
-        *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
+        *"$sep"*)
+          source=${rest%%"$sep"*}
+          detail=${rest#*"$sep"}
+          display_marker="${sep}target: "
+          case "$detail" in
+            label:\ *"$display_marker"*"$sep"*)
+              display_rest=${detail#label: }
+              display_label=${display_rest%%"$display_marker"*}
+              display_rest=${display_rest#*"$display_marker"}
+              display_target=${display_rest%%"$sep"*}
+              if [ -n "$display_label" ] && [ -n "$display_target" ] \
+                 && [ "$display_rest" != "$display_target" ]; then
+                detail=${display_rest#*"$sep"}
+              fi
+              ;;
+          esac
+          ;;
         *) source=$rest ;;
       esac
       ;;

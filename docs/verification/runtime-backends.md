@@ -151,32 +151,31 @@ The remaining label subsystem has fixture-only proof dated 2026-07-27.
 These commands used fake Herdr inventories and did not read, rename, close, or otherwise mutate a live Herdr session:
 
 ```sh
-bash tests/fm-backend-herdr-labels.test.sh
-bash tests/fm-herdr-primary-labels.test.sh
-bash tests/fm-herdr-display-surfaces.test.sh
-bash tests/fm-promote-herdr.test.sh
+bin/fm-test-run.sh tests/fm-backend-herdr-labels.test.sh
+bin/fm-test-run.sh tests/fm-herdr-primary-labels.test.sh
+bin/fm-test-run.sh tests/fm-spawn-herdr-recovery.test.sh
+bin/fm-test-run.sh tests/fm-herdr-display-surfaces.test.sh
+bin/fm-test-run.sh tests/fm-promote-herdr.test.sh
 ```
 
 Observed focused output included:
 
 ```text
-ok - Herdr labels: firstmate subject is reserved to the primary role
-ok - Herdr metadata: native-session alias is exact, display-only, and parent-published
+ok - Herdr labels: native primary and firstmate project stay distinct
 ok - Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse
-ok - Herdr primary labels: session start calls owner only on locked path before bootstrap
-ok - Herdr primary labels: exact lock/process/cwd ownership converges by exact ids
-ok - Herdr primary labels: unsafe lock/process/cwd/socket/label/collision inputs refuse before rename
-ok - Herdr primary labels: partial old/new mix converges on the next locked startup
+ok - Herdr session lock: globally unique physical sockets own lock identity
+ok - Herdr spawn recovery: v1 flat fallback excludes the projected child
+ok - Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent
+ok - Herdr spawn recovery: parent-only second mate replaces one exact no-agent husk
 ok - Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first
 ok - Display isolation: synthetic non-Herdr state and snapshot output remain unchanged
-ok - Herdr display: send is silent on success, label-first on errors, and routes exact ids
-ok - Herdr display: piped peek stays raw and interactive peek adds a label-first header
-ok - Herdr metadata: new task record uses validated same-directory rename and carries session alias
+ok - Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures
 ok - Herdr promotion: partial tab/pane failure retains intent and retry converges forward
-ok - Herdr teardown: unresolved exact-ID role-transition intent refuses cleanup
+ok - Herdr teardown: transition refusal applies only to validated Herdr metadata
+ok - Promotion compatibility: generic bytes stay legacy while malformed Herdr claims refuse
 ```
 
-The fixtures prove formatter role boundaries, the honest `Shared Herdr session` metadata field, global bare-selector uniqueness, lock/process/cwd ownership refusals, exact-ID response verification, partial forward convergence, label-first rendering, routing byte preservation, same-directory metadata publication shape, and recoverable scout-to-ship relabeling.
+The fixtures prove separate native-primary and project roles, exact legacy-label corroboration, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, exact-ID response verification, label-first rendering, state-detail parsing, routing byte preservation, behavioral complete-record visibility, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
 They do not prove that the current live primary, worker, or second mate has been renamed.
 
 The guarded current-live proof remains pending because this implementation lane had no authority to touch live Herdr state.

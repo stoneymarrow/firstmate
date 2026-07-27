@@ -122,7 +122,7 @@ SH
 # Snapshot adds Herdr-only label keys before the unchanged routing target, and
 # fleet view renders the same order.
 test_fleet_snapshot_and_view() {
-  local snapshot keys view root
+  local snapshot view_snapshot keys view root
   snapshot=$(run_env "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
     || fail "fleet snapshot fixture failed"
   [ "$(printf '%s' "$snapshot" | jq -r '.schema')" = 'fm-fleet-snapshot.v1' ] \
@@ -134,10 +134,31 @@ test_fleet_snapshot_and_view() {
   [ "$(printf '%s' "$snapshot" | jq -r '.tasks[0].endpoint.display_label')" = 'invoice-check · scout' ] \
     && [ "$(printf '%s' "$snapshot" | jq -r '.tasks[0].endpoint.session_display_label')" = 'Shared Herdr session' ] \
     || fail "snapshot omitted Herdr display labels"
+  view_snapshot=$snapshot
+  printf '%s' "$snapshot" | jq -e '
+    .tasks[0].current_state.state == "paused"
+    and .tasks[0].current_state.source == "status-log"
+    and .tasks[0].current_state.detail == "waiting for filing"
+    and .tasks[0].current_state.raw ==
+      "state: paused · source: status-log · label: invoice-check · scout · target: shared:w1:p1 · waiting for filing"
+  ' >/dev/null || fail "fleet snapshot retained Herdr display fields inside state detail"
+
+  cp "$STATE/invoice-check.meta" "$TMP_ROOT/invoice-check.meta.saved"
+  printf 'paused: waiting · for filing\n' > "$STATE/invoice-check.status"
+  perl -pi -e 's/^display_label=.*$/display_label=-/' "$STATE/invoice-check.meta"
+  snapshot=$(run_env "$ROOT/bin/fm-fleet-snapshot.sh" --json) \
+    || fail "fleet snapshot display-label dash fixture failed"
+  [ "$(printf '%s' "$snapshot" | jq -r '.tasks[0].current_state.detail')" = 'waiting · for filing' ] \
+    || fail "state detail containing the display separator was truncated"
+  [ "$(printf '%s' "$snapshot" | jq -r '.tasks[0].current_state.raw')" = \
+    'state: paused · source: status-log · label: - · target: shared:w1:p1 · waiting · for filing' ] \
+    || fail "display-label dash or raw state bytes changed"
+  mv "$TMP_ROOT/invoice-check.meta.saved" "$STATE/invoice-check.meta"
+  printf 'paused: waiting for filing\n' > "$STATE/invoice-check.status"
 
   root="$TMP_ROOT/view-root"; mkdir -p "$root/bin"
   cp "$ROOT/bin/fm-fleet-view.sh" "$root/bin/fm-fleet-view.sh"
-  printf '%s\n' "$snapshot" > "$root/snapshot.json"
+  printf '%s\n' "$view_snapshot" > "$root/snapshot.json"
   cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
 #!/usr/bin/env bash
 cat '$root/snapshot.json'
@@ -147,6 +168,45 @@ SH
   assert_before "$view" 'invoice-check · scout' 'shared:w1:p1' "fleet view target preceded its label"
   assert_contains "$view" 'Shared Herdr session' "fleet view omitted session display alias"
   pass "Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first"
+}
+
+# Malformed optional display grammar stays in detail rather than losing bytes;
+# an unknown line keeps its raw fallback and unknown state fields.
+test_fleet_state_detail_malformed_fallback() {
+  local helper root raw parsed
+  helper=$(sed -n '/^crew_state_json()/,/^}/p' "$ROOT/bin/fm-fleet-snapshot.sh")
+  [ -n "$helper" ] || fail "fleet state parser function is missing"
+  root="$TMP_ROOT/state-parser-root"; mkdir -p "$root/bin"
+  cat > "$root/bin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_CREW_RAW"
+SH
+  chmod +x "$root/bin/fm-crew-state.sh"
+  raw='state: paused · source: status-log · label:  · target: shared:w1:p1 · waiting for filing'
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" \
+    bash -c '
+      FM_ROOT=$FM_TEST_ROOT; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT
+      DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      SCRIPT_DIR=$FM_TEST_ROOT/bin
+      eval "$FM_TEST_HELPER"
+      crew_state_json fixture
+    ') || fail "malformed state-detail parser fixture failed"
+  [ "$(printf '%s' "$parsed" | jq -r '.detail')" = \
+    'label:  · target: shared:w1:p1 · waiting for filing' ] \
+    || fail "malformed display fields were stripped from fallback detail"
+  raw='unexpected crew state bytes'
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" \
+    bash -c '
+      FM_ROOT=$FM_TEST_ROOT; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT
+      DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      SCRIPT_DIR=$FM_TEST_ROOT/bin
+      eval "$FM_TEST_HELPER"
+      crew_state_json fixture
+    ') || fail "unknown state-line parser fixture failed"
+  printf '%s' "$parsed" | jq -e \
+    '.state == "unknown" and .source == "none" and .detail == "" and .raw == "unexpected crew state bytes"' \
+    >/dev/null || fail "unknown state line changed its legacy fallback fields"
+  pass "Herdr display: malformed and unknown crew-state shapes keep fallback bytes"
 }
 
 # Crew state keeps the leading state/source grammar and puts label then target
@@ -219,22 +279,95 @@ test_peek_display_and_raw_pipe() {
   pass "Herdr display: piped peek stays raw and interactive peek adds a label-first header"
 }
 
-# Spawn's Herdr-only branch publishes through a same-directory temporary file,
-# validates the complete record, then renames it. The non-Herdr destination
-# remains the direct metadata path.
-test_atomic_spawn_publication_shape() {
-  local source mktemp_line validate_line move_line alias_line
+# The extracted spawn publisher is exercised with a blocking PATH-injected mv.
+# A concurrent reader sees only the old complete record until rename, then the
+# complete validated candidate. Validation and rename failures preserve old bytes.
+test_atomic_metadata_publication_behavior() {
+  local dir fake helper public candidate old_bytes pid out status source
+  dir="$TMP_ROOT/atomic-publication"; fake="$dir/bin"; mkdir -p "$fake" "$dir/state"
+  helper=$(sed -n '/^spawn_herdr_metadata_publish()/,/^}/p' "$ROOT/bin/fm-spawn.sh")
+  [ -n "$helper" ] || fail "spawn Herdr publication helper is missing"
+  cat > "$fake/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${FM_TEST_MV_MODE:-pass}" in
+  block)
+    : > "$FM_TEST_MV_READY"
+    while [ ! -e "$FM_TEST_MV_RELEASE" ]; do sleep 0.02; done
+    exec /bin/mv "$@"
+    ;;
+  fail) exit 1 ;;
+  *) exec /bin/mv "$@" ;;
+esac
+SH
+  chmod +x "$fake/mv"
+  public="$dir/state/task.meta"
+  candidate="$dir/state/.task.meta.spawn.candidate"
+  printf '%s\n' 'old=complete' > "$public"
+  old_bytes=$(cat "$public")
+  cat > "$candidate" <<'EOF'
+window=shared:w1:p1
+worktree=/tmp/worktree
+project=/tmp/project
+harness=pi
+kind=ship
+backend=herdr
+herdr_session=shared
+herdr_session_display_label=Shared Herdr session
+herdr_workspace_id=w1
+herdr_tab_id=w1:t1
+herdr_pane_id=w1:p1
+EOF
+  (
+    PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=block \
+      FM_TEST_MV_READY="$dir/ready" FM_TEST_MV_RELEASE="$dir/release" \
+      FM_TEST_HELPER="$helper" FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+      bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT"
+  ) &
+  pid=$!
+  for _ in $(seq 1 100); do [ -e "$dir/ready" ] && break; sleep 0.02; done
+  [ -e "$dir/ready" ] || fail "blocking rename did not reach the publication boundary"
+  [ "$(cat "$public")" = "$old_bytes" ] || fail "reader observed candidate bytes before atomic rename"
+  : > "$dir/release"
+  wait "$pid" || fail "released atomic rename failed"
+  grep -qx 'herdr_pane_id=w1:p1' "$public" || fail "reader did not observe the complete candidate after rename"
+  [ "$(grep -c '^backend=herdr$' "$public")" = 1 ] || fail "published candidate was incomplete"
+
+  printf '%s\n' 'old=complete' > "$public"
+  printf '%s\n' 'backend=herdr' > "$candidate"
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed Herdr candidate was published"
+  [ "$(cat "$public")" = 'old=complete' ] || fail "malformed validation changed public metadata"
+
+  cat > "$candidate" <<'EOF'
+window=shared:w1:p1
+worktree=/tmp/worktree
+project=/tmp/project
+harness=pi
+kind=ship
+backend=herdr
+herdr_session=shared
+herdr_session_display_label=Shared Herdr session
+herdr_workspace_id=w1
+herdr_tab_id=w1:t1
+herdr_pane_id=w1:p1
+EOF
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=fail \
+    FM_TEST_HELPER="$helper" FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "injected rename failure reported publication success"
+  [ "$(cat "$public")" = 'old=complete' ] || fail "rename failure changed public metadata"
+
   source=$(<"$ROOT/bin/fm-spawn.sh")
-  mktemp_line=$(grep -Fn "HERDR_META_TEMP=\$(mktemp \"\$STATE/.\${ID}.meta.spawn.XXXXXX\")" "$ROOT/bin/fm-spawn.sh" | cut -d: -f1)
-  validate_line=$(grep -Fn "fm_backend_herdr_metadata_validate_record \"\$HERDR_META_TEMP\"" "$ROOT/bin/fm-spawn.sh" | cut -d: -f1)
-  move_line=$(grep -Fn "mv -f \"\$HERDR_META_TEMP\" \"\$STATE/\$ID.meta\"" "$ROOT/bin/fm-spawn.sh" | cut -d: -f1)
-  alias_line=$(grep -Fn "echo \"herdr_session_display_label=\$(fm_backend_herdr_session_display_label)\"" "$ROOT/bin/fm-spawn.sh" | cut -d: -f1)
-  [ -n "$mktemp_line" ] && [ -n "$validate_line" ] && [ -n "$move_line" ] && [ -n "$alias_line" ] \
-    || fail "spawn atomic Herdr publication shape is incomplete"
-  [ "$mktemp_line" -lt "$validate_line" ] && [ "$validate_line" -lt "$move_line" ] \
-    || fail "spawn does not validate its same-directory temporary record before rename"
-  assert_contains "$source" "META_OUTPUT=\"\$STATE/\$ID.meta\"" "spawn lost the unchanged direct non-Herdr destination"
-  pass "Herdr metadata: new task record uses validated same-directory rename and carries session alias"
+  assert_contains "$source" "META_OUTPUT=\"\$STATE/\$ID.meta\"" \
+    "spawn lost the byte-compatible direct non-Herdr publication destination"
+  assert_contains "$source" "spawn_herdr_metadata_publish \"\$HERDR_META_TEMP\" \"\$STATE/\$ID.meta\"" \
+    "spawn does not route only its Herdr candidate through the atomic publisher"
+  pass "Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures"
 }
 
 # A synthetic non-adapter record proves the new fields remain Herdr-only
@@ -268,7 +401,8 @@ EOF
 test_session_start_display
 test_fleet_snapshot_and_view
 test_non_herdr_output_unchanged
+test_fleet_state_detail_malformed_fallback
 test_crew_state_display
 test_send_display_and_routing
 test_peek_display_and_raw_pipe
-test_atomic_spawn_publication_shape
+test_atomic_metadata_publication_behavior

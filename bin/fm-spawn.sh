@@ -32,18 +32,23 @@
 #   writes state/<id>.herdr-presentation atomically, then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
 #   upgrades its attempt journal with exact task kind, readable label, home,
-#   session, workspace, tab, pane, parent, and presentation-label bindings. On a
-#   same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
+#   session, workspace, tab, pane, parent, and presentation-label bindings.
+#   Same-identity recovery may replace one exact agent-free husk. Flat fallback
+#   keeps projected-child evidence separate: v2/v3 select only the journal's
+#   exact parent id, while v1 excludes its unique token-bound child and uses
+#   normal parent discovery. A validated child-home parent record may recover
+#   only one exact second-mate no-agent publication husk when primary metadata
+#   is absent; it stays a separate argument and gains no projection authority.
 #   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation is
-#   unchanged. New Herdr task metadata carries the honest display-only shared
-#   session alias and publishes through a validated same-directory temporary
-#   file plus rename; every non-Herdr metadata path keeps direct publication.
+#   authority. Treehouse allocation is unchanged. A Herdr task candidate is
+#   created mode 0600 in state/, validated with the fixed shared-session alias,
+#   and renamed over the public path from the same directory. A second-mate
+#   parent record publishes first; the primary record publishes second; their
+#   exact tuple is compared before launch. Every non-Herdr path keeps direct
+#   publication.
 #   A clean projected create or exact resume makes one bounded attempt to hold
-#   the one session-scoped presentation-order lock (keyed by named session plus
-#   canonical socket, outside any home's state/) through launch handoff. Lock
+#   the one presentation-order lock keyed only by the globally unique physical
+#   running socket, outside any home's state/, through launch handoff. Lock
 #   contention warns and falls back to the ordinary flat layout before any
 #   projection mutation. The exact response-derived new workspace is inserted
 #   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
@@ -255,6 +260,50 @@ parse_orca_worktree_result() {
   else
     ORCA_TERMINAL=
   fi
+}
+
+# Publish one complete Herdr task record from a mode-0600 same-directory
+# candidate. Validation and the fixed shared-session alias are checked before
+# one rename. The public path is therefore absent, its prior complete record,
+# or the complete candidate; validation and rename failures never expose
+# partial candidate bytes. Candidate creation and trap cleanup remain owned by
+# the caller. Non-Herdr publication never calls this helper.
+spawn_herdr_metadata_publish() {  # <private-candidate> <public-path>
+  local candidate=$1 public=$2 candidate_dir public_dir candidate_real public_real
+  [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  candidate_dir=$(dirname "$candidate") || return 1
+  public_dir=$(dirname "$public") || return 1
+  candidate_real=$(cd "$candidate_dir" 2>/dev/null && pwd -P) || return 1
+  public_real=$(cd "$public_dir" 2>/dev/null && pwd -P) || return 1
+  [ "$candidate_real" = "$public_real" ] || return 1
+  [ ! -L "$public" ] || return 1
+  fm_backend_herdr_metadata_validate_record "$candidate" || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$candidate" herdr_session_display_label)" \
+    = "$(fm_backend_herdr_session_display_label)" ] || return 1
+  mv -f "$candidate" "$public"
+}
+
+# A second-mate launch publishes its child-home parent record first and its
+# primary-home task record second. Before launch, both complete records must
+# resolve to one identical session/workspace/tab/pane tuple.
+spawn_herdr_secondmate_publications_match() {  # <task-meta> <parent-meta> <task-id> <home>
+  local task_meta=$1 parent_meta=$2 task_id=$3 home=$4
+  local session workspace tab pane
+  fm_backend_herdr_metadata_validate_record "$task_meta" || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$task_meta" backend)" = herdr ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$task_meta" kind)" = secondmate ] || return 1
+  fm_backend_herdr_metadata_load_tuple "$task_meta" || return 1
+  session=$FM_BACKEND_HERDR_META_SESSION
+  workspace=$FM_BACKEND_HERDR_META_WORKSPACE
+  tab=$FM_BACKEND_HERDR_META_TAB
+  pane=$FM_BACKEND_HERDR_META_PANE
+  fm_backend_herdr_parent_metadata_validate_recovery \
+    "$parent_meta" "$task_id" "$home" "$home" "$home" "$session" || return 1
+  fm_backend_herdr_metadata_load_tuple "$parent_meta" || return 1
+  [ "$FM_BACKEND_HERDR_META_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_META_WORKSPACE" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_META_TAB" = "$tab" ] \
+    && [ "$FM_BACKEND_HERDR_META_PANE" = "$pane" ]
 }
 
 spawn_abort_cleanup() {
@@ -880,9 +929,10 @@ herdr_projection_meta_field_exact() {  # <meta> <key>
 }
 
 # A stale presentation journal never grants launch authority.
-# Under the session lock, authoritative metadata must identify one positively
-# dead or agent-free endpoint before token inspection may allow flat fallback.
-# Exact Herdr fields are retained for the narrower version 2 reclaim path.
+# Under the session lock, exact task metadata must identify one positively dead
+# or agent-free endpoint before token inspection may allow flat fallback.
+# Its Herdr fields remain projected-child evidence until the separate flat
+# classifier proves a prior successful flat retry.
 herdr_projection_existing_meta_allows_flat() {  # <meta>
   local meta=$1 old_backend old_target old_session old_pane old_state target_session target_pane
   HERDR_RECOVERY_BACKEND=""
@@ -890,6 +940,12 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   HERDR_RECOVERY_TAB_ID=""
   HERDR_RECOVERY_PANE_ID=""
   old_backend=$(fm_backend_of_meta "$meta")
+  if [ "$old_backend" = herdr ]; then
+    fm_backend_herdr_metadata_validate_record "$meta" || {
+      echo "error: existing Herdr metadata for $ID is malformed; refusing duplicate launch" >&2
+      return 1
+    }
+  fi
   old_target=$(fm_backend_target_of_meta "$meta")
   [ -n "$old_target" ] || {
     echo "error: existing metadata for $ID has no endpoint; refusing duplicate launch while its herdr presentation journal is quarantined" >&2
@@ -947,6 +1003,74 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
   esac
 }
 
+# Separate projected-child evidence from lawful flat-parent evidence. V2/v3
+# journals select only their exact parent id and may carry the derived prior
+# <project> · primary label for that id. V1 has no parent binding and excludes
+# only the unique token-bound child. Existing task metadata is passed onward
+# only after it is proved to describe a prior successful flat fallback.
+herdr_projection_prepare_flat_evidence() {  # <journal> [task-meta]
+  local journal=$1 meta=${2:-} version meta_backend="" meta_workspace="" meta_session=""
+  local prior_parent="" canonical_home
+  HERDR_FLAT_TASK_META=""
+  HERDR_FLAT_EXCLUDED_META=""
+  HERDR_FLAT_PARENT_WORKSPACE_ID=""
+  HERDR_FLAT_PARENT_PRIOR_LABEL=""
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$ID" || return 1
+  version=$FM_BACKEND_HERDR_JOURNAL_FORMAT_VERSION
+  if [ -n "$meta" ] && { [ -e "$meta" ] || [ -L "$meta" ]; }; then
+    meta_backend=$(fm_backend_of_meta "$meta")
+    if [ "$meta_backend" = herdr ]; then
+      fm_backend_herdr_metadata_load_tuple "$meta" || return 1
+      meta_workspace=$FM_BACKEND_HERDR_META_WORKSPACE
+      meta_session=$FM_BACKEND_HERDR_META_SESSION
+    fi
+  fi
+  case "$version" in
+    2|3)
+      canonical_home=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME") || return 1
+      [ "$FM_BACKEND_HERDR_JOURNAL_HOME" = "$canonical_home" ] \
+        && [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" = "$HERDR_SES" ] || {
+        echo "error: projected fallback for $ID has a foreign home or session binding" >&2
+        return 1
+      }
+      HERDR_FLAT_PARENT_WORKSPACE_ID=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+      prior_parent=$(FM_HOME="$HERDR_LABEL_HOME" \
+        fm_backend_herdr_workspace_prior_primary_label "$PROJ_ABS" 2>/dev/null || true)
+      if [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" = "$HERDR_HOME_LABEL" ]; then
+        HERDR_FLAT_PARENT_PRIOR_LABEL=""
+      elif [ -n "$prior_parent" ] \
+           && [ "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" = "$prior_parent" ]; then
+        HERDR_FLAT_PARENT_PRIOR_LABEL=$prior_parent
+      else
+        echo "error: projected fallback for $ID has a foreign flat-parent label" >&2
+        return 1
+      fi
+      if [ "$meta_backend" = herdr ]; then
+        [ "$meta_session" = "$FM_BACKEND_HERDR_JOURNAL_SESSION" ] || return 1
+        if [ "$meta_workspace" = "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" ]; then
+          HERDR_FLAT_EXCLUDED_META=$meta
+        elif [ "$meta_workspace" = "$HERDR_FLAT_PARENT_WORKSPACE_ID" ]; then
+          HERDR_FLAT_TASK_META=$meta
+        else
+          echo "error: existing Herdr metadata for $ID is neither the exact projected child nor its exact flat parent" >&2
+          return 1
+        fi
+      fi
+      ;;
+    1)
+      if [ "$meta_backend" = herdr ]; then
+        if [ "${FM_BACKEND_HERDR_PROJECTION_TOKEN_MATCH_COUNT:-0}" = 1 ] \
+           && [ "$meta_workspace" != "$FM_BACKEND_HERDR_PROJECTION_UNIQUE_TOKEN_WORKSPACE_ID" ]; then
+          HERDR_FLAT_TASK_META=$meta
+        else
+          HERDR_FLAT_EXCLUDED_META=$meta
+        fi
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 W="fm-$ID"
 case "$BACKEND" in
   tmux)
@@ -975,6 +1099,7 @@ case "$BACKEND" in
     # in the secondmate's own workspace, not a primary project workspace.
     HERDR_LABEL_HOME=$FM_HOME
     HERDR_PARENT_META_OUTPUT=""
+    HERDR_PARENT_RECOVERY_META=""
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_PARENT_META_OUTPUT="$PROJ_ABS/state/.herdr-parent.meta"
@@ -987,6 +1112,22 @@ case "$BACKEND" in
     fm_backend_herdr_metadata_validate_home "$STATE" || exit 1
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
+    HERDR_FLAT_TASK_META="$STATE/$ID.meta"
+    if [ "$KIND" = secondmate ] \
+       && [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] \
+       && { [ -e "$HERDR_PARENT_META_OUTPUT" ] || [ -L "$HERDR_PARENT_META_OUTPUT" ]; }; then
+      HERDR_SES=$(fm_backend_herdr_session)
+      FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_parent_metadata_validate_recovery \
+        "$HERDR_PARENT_META_OUTPUT" "$ID" "$PROJ_ABS" "$PROJ_ABS" "$PROJ_ABS" "$HERDR_SES" || {
+        echo "error: second-mate parent-only recovery record is malformed or foreign" >&2
+        exit 1
+      }
+      HERDR_FLAT_TASK_META=""
+      HERDR_PARENT_RECOVERY_META=$HERDR_PARENT_META_OUTPUT
+    fi
+    HERDR_FLAT_EXCLUDED_META=""
+    HERDR_FLAT_PARENT_WORKSPACE_ID=""
+    HERDR_FLAT_PARENT_PRIOR_LABEL=""
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       HERDR_SES=$(fm_backend_herdr_session)
       HERDR_PARENT_LABEL=$HERDR_HOME_LABEL
@@ -1034,6 +1175,10 @@ case "$BACKEND" in
           esac
         else
           spawn_herdr_presentation_order_lock_release
+        fi
+        if [ "$HERDR_PROJECTED" -ne 1 ]; then
+          herdr_projection_prepare_flat_evidence \
+            "$HERDR_PRESENTATION_JOURNAL" "$STATE/$ID.meta" || exit 1
         fi
       elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
         # Session lock path resolution and exact parent binding both need a
@@ -1104,7 +1249,8 @@ case "$BACKEND" in
         exit 1
       }
       HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure \
-        "$PROJ_ABS" "$STATE/$ID.meta") || exit 1
+        "$PROJ_ABS" "$HERDR_FLAT_TASK_META" "$HERDR_FLAT_EXCLUDED_META" \
+        "$HERDR_FLAT_PARENT_WORKSPACE_ID" "$HERDR_FLAT_PARENT_PRIOR_LABEL") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -1117,7 +1263,8 @@ case "$BACKEND" in
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
       HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
         "$CONTAINER" "$ID" "$KIND" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" \
-        "$STATE/$ID.meta" "$HERDR_PARENT_META_OUTPUT") || exit 1
+        "$HERDR_FLAT_TASK_META" "$HERDR_PARENT_META_OUTPUT" \
+        "$HERDR_PARENT_RECOVERY_META") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -1518,11 +1665,15 @@ fi
   fi
 } > "$META_OUTPUT"
 if [ "$BACKEND" = herdr ]; then
-  fm_backend_herdr_metadata_validate_record "$HERDR_META_TEMP" || exit 1
-  [ "$(fm_backend_herdr_meta_field_exact "$HERDR_META_TEMP" herdr_session_display_label)" \
-    = "$(fm_backend_herdr_session_display_label)" ] || exit 1
-  mv -f "$HERDR_META_TEMP" "$STATE/$ID.meta" || exit 1
+  spawn_herdr_metadata_publish "$HERDR_META_TEMP" "$STATE/$ID.meta" || exit 1
   HERDR_META_TEMP=
+  if [ "$KIND" = secondmate ]; then
+    FM_HOME="$HERDR_LABEL_HOME" spawn_herdr_secondmate_publications_match \
+      "$STATE/$ID.meta" "$HERDR_PARENT_META_OUTPUT" "$ID" "$PROJ_ABS" || {
+      echo "error: second-mate parent and primary Herdr publications do not share one exact tuple" >&2
+      exit 1
+    }
+  fi
 fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 

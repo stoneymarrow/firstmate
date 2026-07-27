@@ -228,6 +228,42 @@ test_ownership_refusals() {
   pass "Herdr primary labels: unsafe lock/process/cwd/socket/label/collision inputs refuse before rename"
 }
 
+# Session mutation locks use one globally unique physical socket identity.
+# Running raw/symlink aliases refuse, stopped aliases do not participate, and
+# distinct sockets produce distinct lock paths.
+test_physical_socket_lock_identity() {
+  local dir fake alias other tmp lock_a lock_b
+  dir="$TMP_ROOT/physical-socket-lock"; setup_fixture "$dir"; fake=$(make_fakebin "$dir")
+  alias="$dir/session/socket-alias"; ln -s "$FIXTURE_SOCKET" "$alias"
+  tmp=$(mktemp "${FIXTURE_STATE}.XXXXXX")
+  jq --arg alias "$alias" '.sessions += [{name:"alias",running:true,socket_path:$alias}]' \
+    "$FIXTURE_STATE" > "$tmp"; mv "$tmp" "$FIXTURE_STATE"
+  if PATH="$fake:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FIXTURE_HOME" \
+    FM_HERDR_TEST_STATE="$FIXTURE_STATE" FM_HERDR_TEST_LOG="$FIXTURE_LOG" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path shared' \
+      "$ROOT" >/dev/null 2>&1; then
+    fail "running symlink-equivalent socket aliases received separate lock authority"
+  fi
+
+  tmp=$(mktemp "${FIXTURE_STATE}.XXXXXX")
+  jq '.sessions[1].running=false' "$FIXTURE_STATE" > "$tmp"; mv "$tmp" "$FIXTURE_STATE"
+  lock_a=$(PATH="$fake:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FIXTURE_HOME" \
+    FM_HERDR_TEST_STATE="$FIXTURE_STATE" FM_HERDR_TEST_LOG="$FIXTURE_LOG" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path shared' "$ROOT") \
+    || fail "stopped socket alias blocked the running session lock"
+
+  other="$dir/session/other.sock"; : > "$other"
+  tmp=$(mktemp "${FIXTURE_STATE}.XXXXXX")
+  jq --arg other "$other" '.sessions += [{name:"other",running:true,socket_path:$other}]' \
+    "$FIXTURE_STATE" > "$tmp"; mv "$tmp" "$FIXTURE_STATE"
+  lock_b=$(PATH="$fake:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FIXTURE_HOME" \
+    FM_HERDR_TEST_STATE="$FIXTURE_STATE" FM_HERDR_TEST_LOG="$FIXTURE_LOG" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path other' "$ROOT") \
+    || fail "distinct physical socket did not receive a lock path"
+  [ "$lock_a" != "$lock_b" ] || fail "distinct physical sockets shared one lock path"
+  pass "Herdr session lock: globally unique physical sockets own lock identity"
+}
+
 # A failed third rename leaves an old/new mix with a clear diagnostic; the next
 # locked startup accepts only that mix and completes it.
 test_partial_convergence() {
@@ -304,4 +340,5 @@ test_inert_without_exact_environment
 test_session_start_locked_wiring
 test_owned_success
 test_ownership_refusals
+test_physical_socket_lock_identity
 test_partial_convergence

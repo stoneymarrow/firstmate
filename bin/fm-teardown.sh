@@ -127,7 +127,19 @@ T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 HERDR_ROLE_TRANSITION_INTENT="$STATE/$ID.herdr-role-transition"
-if [ -e "$HERDR_ROLE_TRANSITION_INTENT" ] || [ -L "$HERDR_ROLE_TRANSITION_INTENT" ]; then
+HERDR_ROLE_TRANSITION_VALIDATED=0
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_source herdr || exit 1
+  fm_backend_herdr_metadata_validate_record "$META" || exit 1
+  [ "$(grep -c '^backend=herdr$' "$META" 2>/dev/null || true)" = 1 ] \
+    && [ "$(grep -c '^backend=' "$META" 2>/dev/null || true)" = 1 ] || {
+    echo "REFUSED: task $ID has a malformed Herdr backend claim." >&2
+    exit 1
+  }
+  HERDR_ROLE_TRANSITION_VALIDATED=1
+fi
+if [ "$HERDR_ROLE_TRANSITION_VALIDATED" = 1 ] \
+   && { [ -e "$HERDR_ROLE_TRANSITION_INTENT" ] || [ -L "$HERDR_ROLE_TRANSITION_INTENT" ]; }; then
   echo "REFUSED: task $ID has an unresolved Herdr role transition; rerun promotion before cleanup." >&2
   exit 1
 fi
