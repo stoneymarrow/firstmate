@@ -5,7 +5,19 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fm-spawn-herdr-recovery.XXXXXX")
-trap 'rm -rf "$TMP_ROOT"' EXIT
+BASE_PATH=$PATH
+TASK_TMP_PATHS=
+cleanup() {
+  local path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rm -rf "$path"
+  done <<EOF
+$TASK_TMP_PATHS
+EOF
+  rm -rf "$TMP_ROOT"
+}
+trap cleanup EXIT
 
 fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
@@ -36,6 +48,244 @@ SH
   printf '%s' "$dir/bin"
 }
 
+# Stateful fake used only by the full-path fixtures below. It models the
+# production Herdr calls made by fm-herdr-primary-labels.sh and fm-spawn.sh,
+# persists exact workspace/tab/pane state in one temporary JSON file, and logs
+# every command. It never contacts a live Herdr session.
+make_stateful_herdr() {  # <fixture-dir>
+  local dir=$1 socket="$1/fake.sock"
+  mkdir -p "$dir/bin"
+  : > "$socket"
+  printf '{"next":10,"session":"fmtest","socket":%s,"workspaces":[],"tabs":[],"panes":[],"agents":{},"pending":{},"faults":{}}\n' \
+    "$(printf '%s' "$socket" | jq -Rs .)" > "$dir/state.json"
+  : > "$dir/herdr.log"
+  cat > "$dir/bin/herdr" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+state_path = os.environ["FM_FAKE_HERDR_STATE"]
+log_path = os.environ["FM_HERDR_LOG"]
+args = sys.argv[1:]
+with open(log_path, "a", encoding="utf-8") as log:
+    log.write("\x1f".join(args) + "\n")
+if len(args) >= 2 and args[-2] == "--session":
+    args = args[:-2]
+with open(state_path, encoding="utf-8") as src:
+    state = json.load(src)
+
+
+def save():
+    tmp = state_path + ".tmp." + str(os.getpid())
+    with open(tmp, "w", encoding="utf-8") as out:
+        json.dump(state, out, sort_keys=True, separators=(",", ":"))
+        out.write("\n")
+    os.replace(tmp, state_path)
+
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")))
+
+
+def option(name, default=""):
+    try:
+        return args[args.index(name) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def workspace(wsid):
+    return next((row for row in state["workspaces"] if row["workspace_id"] == wsid), None)
+
+
+def tab(tab_id):
+    return next((row for row in state["tabs"] if row["tab_id"] == tab_id), None)
+
+
+def pane(pane_id):
+    return next((row for row in state["panes"] if row["pane_id"] == pane_id), None)
+
+
+def normalize_focus():
+    if not state["workspaces"]:
+        return
+    focused = [row for row in state["workspaces"] if row.get("focused")]
+    if len(focused) != 1:
+        for row in state["workspaces"]:
+            row["focused"] = False
+        state["workspaces"][0]["focused"] = True
+        focused = [state["workspaces"][0]]
+    current = focused[0]
+    tabs = [row for row in state["tabs"] if row["workspace_id"] == current["workspace_id"]]
+    active = next((row for row in tabs if row["tab_id"] == current.get("active_tab_id")), None)
+    if active is None and tabs:
+        active = tabs[0]
+        current["active_tab_id"] = active["tab_id"]
+    for row in state["tabs"]:
+        row["focused"] = bool(active and row["tab_id"] == active["tab_id"])
+
+
+cmd = tuple(args[:2])
+if cmd == ("status", "--json"):
+    emit({"client": {"version": "0.7.5", "protocol": 16}, "server": {"running": True}})
+elif cmd == ("session", "list"):
+    emit({"sessions": [{"name": state["session"], "running": True, "socket_path": state["socket"]}]})
+elif cmd == ("workspace", "list"):
+    normalize_focus()
+    save()
+    emit({"result": {"workspaces": state["workspaces"]}})
+elif cmd == ("workspace", "get"):
+    row = workspace(args[2])
+    emit({"result": {"workspace": row}} if row else {"error": {"code": "workspace_not_found"}})
+elif cmd == ("workspace", "create"):
+    n = state["next"]
+    state["next"] += 1
+    wsid = f"w{n}"
+    tab_id = f"{wsid}:t{n}"
+    pane_id = f"{wsid}:p{n}"
+    label = option("--label")
+    cwd = option("--cwd")
+    focused = not any(row.get("focused") for row in state["workspaces"])
+    state["workspaces"].append({"workspace_id": wsid, "label": label, "focused": focused, "active_tab_id": tab_id})
+    state["tabs"].append({"workspace_id": wsid, "tab_id": tab_id, "label": "1", "focused": focused})
+    state["panes"].append({"workspace_id": wsid, "tab_id": tab_id, "pane_id": pane_id, "label": "", "cwd": cwd, "foreground_cwd": cwd})
+    save()
+    emit({"result": {"workspace": {"workspace_id": wsid, "label": label}, "tab": {"tab_id": tab_id}, "root_pane": {"pane_id": pane_id}}})
+elif cmd == ("workspace", "rename"):
+    row = workspace(args[2])
+    if not row:
+        emit({"error": {"code": "workspace_not_found"}})
+    else:
+        row["label"] = args[3]
+        save()
+        emit({"result": {"workspace": {"workspace_id": row["workspace_id"], "label": row["label"]}}})
+elif cmd == ("tab", "list"):
+    wsid = option("--workspace")
+    rows = [row for row in state["tabs"] if not wsid or row["workspace_id"] == wsid]
+    emit({"result": {"tabs": rows}})
+elif cmd == ("tab", "get"):
+    row = tab(args[2])
+    emit({"result": {"tab": row}} if row else {"error": {"code": "tab_not_found"}})
+elif cmd == ("tab", "create"):
+    n = state["next"]
+    state["next"] += 1
+    wsid = option("--workspace")
+    tab_id = f"{wsid}:t{n}"
+    pane_id = f"{wsid}:p{n}"
+    label = option("--label")
+    cwd = option("--cwd")
+    state["tabs"].append({"workspace_id": wsid, "tab_id": tab_id, "label": label, "focused": False})
+    state["panes"].append({"workspace_id": wsid, "tab_id": tab_id, "pane_id": pane_id, "label": label, "cwd": cwd, "foreground_cwd": cwd})
+    save()
+    emit({"result": {"tab": {"tab_id": tab_id}, "root_pane": {"pane_id": pane_id}}})
+elif cmd == ("tab", "rename"):
+    row = tab(args[2])
+    if state["faults"].pop("fail_next_tab_rename", False):
+        save()
+        emit({"result": {"tab": {"workspace_id": row["workspace_id"] if row else "", "tab_id": args[2], "label": "fault-injected"}}})
+    elif not row:
+        emit({"error": {"code": "tab_not_found"}})
+    else:
+        row["label"] = args[3]
+        save()
+        emit({"result": {"tab": {"workspace_id": row["workspace_id"], "tab_id": row["tab_id"], "label": row["label"]}}})
+elif cmd == ("tab", "focus"):
+    row = tab(args[2])
+    if not row:
+        emit({"error": {"code": "tab_not_found"}})
+    else:
+        for item in state["workspaces"]:
+            item["focused"] = item["workspace_id"] == row["workspace_id"]
+            if item["focused"]:
+                item["active_tab_id"] = row["tab_id"]
+        normalize_focus()
+        save()
+        emit({"result": {"tab": row}})
+elif cmd == ("tab", "close"):
+    tab_id = args[2]
+    state["tabs"] = [row for row in state["tabs"] if row["tab_id"] != tab_id]
+    state["panes"] = [row for row in state["panes"] if row["tab_id"] != tab_id]
+    normalize_focus()
+    save()
+    emit({})
+elif cmd == ("pane", "list"):
+    wsid = option("--workspace")
+    rows = [row for row in state["panes"] if not wsid or row["workspace_id"] == wsid]
+    emit({"result": {"panes": rows}})
+elif cmd == ("pane", "get"):
+    row = pane(args[2])
+    emit({"result": {"pane": row}} if row else {"error": {"code": "pane_not_found"}})
+elif cmd == ("pane", "rename"):
+    row = pane(args[2])
+    if not row:
+        emit({"error": {"code": "pane_not_found"}})
+    else:
+        row["label"] = args[3]
+        save()
+        emit({"result": {"pane": {"workspace_id": row["workspace_id"], "tab_id": row["tab_id"], "pane_id": row["pane_id"], "label": row["label"]}}})
+elif cmd == ("pane", "close"):
+    pane_id = args[2]
+    old = pane(pane_id)
+    state["panes"] = [row for row in state["panes"] if row["pane_id"] != pane_id]
+    if old and not any(row["tab_id"] == old["tab_id"] for row in state["panes"]):
+        state["tabs"] = [row for row in state["tabs"] if row["tab_id"] != old["tab_id"]]
+    for item in list(state["workspaces"]):
+        if not any(row["workspace_id"] == item["workspace_id"] for row in state["tabs"]):
+            state["workspaces"].remove(item)
+    state["agents"].pop(pane_id, None)
+    normalize_focus()
+    save()
+    emit({})
+elif cmd == ("pane", "run"):
+    row = pane(args[2])
+    if row and len(args) > 3 and args[3] == "treehouse get":
+        row["foreground_cwd"] = os.environ["FM_FAKE_HERDR_WORKTREE"]
+        save()
+    emit({})
+elif cmd == ("pane", "send-text"):
+    state["pending"][args[2]] = args[3] if len(args) > 3 else ""
+    save()
+    emit({})
+elif cmd == ("pane", "send-keys"):
+    state["pending"].pop(args[2], None)
+    save()
+    emit({})
+elif cmd == ("pane", "process-info"):
+    pane_id = option("--pane")
+    emit({"result": {"type": "pane_process_info", "process_info": {"pane_id": pane_id, "foreground_processes": [{"pid": int(os.environ["FM_FAKE_HERDR_OWNER_PID"])}]}}})
+elif cmd == ("agent", "get"):
+    pane_id = args[2]
+    status = state["agents"].get(pane_id)
+    emit({"result": {"agent": {"agent_status": status}}} if status else {"error": {"code": "agent_not_found"}})
+else:
+    emit({})
+PY
+  cat > "$dir/bin/treehouse" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$dir/bin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+destination=
+for arg in "$@"; do destination=$arg; done
+if [ -n "${FM_TEST_FAIL_PUBLIC_PATH:-}" ] \
+   && [ "$destination" = "$FM_TEST_FAIL_PUBLIC_PATH" ] \
+   && [ ! -e "${FM_TEST_FAIL_MARKER:?}" ]; then
+  : > "$FM_TEST_FAIL_MARKER"
+  exit 92
+fi
+exec /bin/mv "$@"
+SH
+  chmod +x "$dir/bin/herdr" "$dir/bin/treehouse" "$dir/bin/sleep" "$dir/bin/mv"
+  printf '%s' "$dir/bin"
+}
+
 response() { printf '%s\n' "$3" > "$1/responses/$2.out"; }
 run_adapter() {  # <home> <fake-bin> <log> <command> [args...]
   local home=$1 fake=$2 log=$3 command=$4
@@ -50,6 +300,325 @@ write_task_meta() {  # <path> <project> <workspace> <tab> <pane> <workspace-labe
     "herdr_workspace_id=$3" "herdr_tab_id=$4" "herdr_pane_id=$5" \
     'display_label=invoice-check · worker' "herdr_workspace_label=$6" \
     'herdr_tab_label=invoice-check · worker' 'herdr_pane_label=invoice-check · worker' > "$1"
+}
+
+state_update() {  # <state> <jq-args...>
+  local state=$1 tmp="$1.tmp.$$"
+  shift
+  jq "$@" "$state" > "$tmp" && /bin/mv "$tmp" "$state"
+}
+
+make_project_and_worktree() {  # <project> <worktree> [clone-firstmate]
+  local project=$1 worktree=$2 clone_firstmate=${3:-0}
+  mkdir -p "$(dirname "$project")" "$(dirname "$worktree")"
+  if [ "$clone_firstmate" = 1 ]; then
+    git clone -q "$ROOT" "$project" || return 1
+  else
+    git -C "$(dirname "$project")" init -q "$(basename "$project")" || return 1
+    printf '# fake Herdr spawn project\n' > "$project/README.md"
+    git -C "$project" add README.md
+    git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
+  fi
+  git -C "$project" worktree add -q --detach "$worktree" HEAD
+}
+
+make_worker_home() {  # <home> <task-id>
+  mkdir -p "$1/state" "$1/config" "$1/data/$2"
+  printf 'Safe full-spawn fake Herdr fixture.\n' > "$1/data/$2/brief.md"
+}
+
+track_task_tmp() {  # <task-id>
+  TASK_TMP_PATHS="${TASK_TMP_PATHS}/tmp/fm-$1"$'\n'
+}
+
+run_real_worker_spawn() {  # <id> <home> <project> <worktree> <fakebin> <state> <log>
+  local id=$1 home=$2 project=$3 worktree=$4 fake=$5 state=$6 log=$7
+  track_task_tmp "$id"
+  PATH="$fake:$BASE_PATH" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HERDR_SESSION=fmtest \
+    FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" \
+    FM_FAKE_HERDR_WORKTREE="$worktree" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'true'" --backend herdr
+}
+
+write_full_projected_meta() {  # <path> <id> <project> <worktree> <workspace> <tab> <pane> <workspace-label> <task-label>
+  cat > "$1" <<EOF
+window=fmtest:$7
+worktree=$4
+project=$3
+harness=sh
+kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-$2
+model=default
+effort=default
+backend=herdr
+herdr_session=fmtest
+herdr_session_display_label=Shared Herdr session
+herdr_workspace_id=$5
+herdr_tab_id=$6
+herdr_pane_id=$7
+display_label=$9
+herdr_workspace_label=$8
+herdr_tab_label=$9
+herdr_pane_label=$9
+EOF
+}
+
+assert_old_projection_untouched() {  # <state> <log> <workspace> <tab> <pane> <label>
+  local state=$1 log=$2 workspace=$3 tab=$4 pane=$5 label=$6 calls
+  jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" --arg label "$label" '
+    ([.workspaces[] | select(.workspace_id == $workspace and .label == $label)] | length) == 1
+    and ([.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab)] | length) == 1
+    and ([.panes[] | select(.workspace_id == $workspace and .tab_id == $tab and .pane_id == $pane)] | length) == 1
+  ' "$state" >/dev/null || fail "full spawn changed the old projected child tuple"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" "workspace"$'\037'"rename"$'\037'"$workspace" \
+    "full fallback renamed the old projected child"
+  assert_not_contains "$calls" "tab"$'\037'"close"$'\037'"$tab" \
+    "full fallback closed the old projected child tab"
+  assert_not_contains "$calls" "pane"$'\037'"close"$'\037'"$pane" \
+    "full fallback closed the old projected child pane"
+  assert_not_contains "$calls" "pane"$'\037'"run"$'\037'"$pane" \
+    "full fallback entered the old projected child"
+}
+
+# Converge the fake native primary through its real owner, then run the real
+# worker-spawn entry point against an isolated copy whose basename is
+# firstmate. The native tuple must remain distinct and byte-stable afterwards.
+test_real_spawn_keeps_native_primary_and_firstmate_project_distinct() {
+  local dir home fake state log socket owner_script project worktree id native_after meta project_workspace
+  dir="$TMP_ROOT/full-native-firstmate"; home="$dir/home"; mkdir -p "$home/state" "$home/config" "$home/data"
+  fake=$(make_stateful_herdr "$dir")
+  state="$dir/state.json"; log="$dir/herdr.log"; socket=$(jq -r '.socket' "$state")
+  # shellcheck disable=SC2016  # jq variables, not shell expansion
+  state_update "$state" --arg root "$ROOT" '
+    .workspaces = [{workspace_id:"native",label:"firstmate",focused:true,active_tab_id:"native:t1"}]
+    | .tabs = [{workspace_id:"native",tab_id:"native:t1",label:"1",focused:true}]
+    | .panes = [{workspace_id:"native",tab_id:"native:t1",pane_id:"native:p1",label:"",cwd:$root,foreground_cwd:$root}]
+  '
+  owner_script="$dir/codex-primary-parent.js"
+  cat > "$owner_script" <<'JS'
+const fs = require("fs");
+const { spawnSync } = require("child_process");
+fs.writeFileSync(process.env.FM_PRIMARY_LOCK, String(process.pid) + "\n");
+const env = { ...process.env, FM_FAKE_HERDR_OWNER_PID: String(process.pid) };
+const result = spawnSync(process.env.FM_PRIMARY_SCRIPT, [], {
+  cwd: process.env.FM_ROOT_OVERRIDE,
+  env,
+  stdio: "inherit",
+});
+process.exit(result.status === null ? 1 : result.status);
+JS
+  (
+    cd "$ROOT" || exit 1
+    PATH="$fake:$BASE_PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_STATE_OVERRIDE="$home/state" FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" \
+      FM_FAKE_HERDR_WORKTREE="$dir/unused" FM_PRIMARY_LOCK="$home/state/.lock" \
+      FM_PRIMARY_SCRIPT="$ROOT/bin/fm-herdr-primary-labels.sh" HERDR_ENV=1 \
+      HERDR_SOCKET_PATH="$socket" HERDR_WORKSPACE_ID=native HERDR_TAB_ID=native:t1 \
+      HERDR_PANE_ID=native:p1 node "$owner_script"
+  ) || fail "real native-primary label owner did not converge against the fake Herdr command"
+  native_after=$(jq -c '
+    {workspace:(.workspaces[]|select(.workspace_id=="native")),
+     tab:(.tabs[]|select(.tab_id=="native:t1")),
+     pane:(.panes[]|select(.pane_id=="native:p1"))}
+  ' "$state")
+  printf '%s' "$native_after" | jq -e '
+    .workspace.label == "firstmate · primary"
+    and .tab.label == "firstmate · primary"
+    and .pane.label == "firstmate · primary"
+  ' >/dev/null || fail "native primary did not converge to its distinct readable label"
+
+  project="$dir/copy/firstmate"; worktree="$dir/worktrees/firstmate-worker"
+  make_project_and_worktree "$project" "$worktree" 1 || fail "could not create the isolated Firstmate repository copy"
+  id="native-project-$$"; make_worker_home "$home" "$id"
+  run_real_worker_spawn "$id" "$home" "$project" "$worktree" "$fake" "$state" "$log" \
+    > "$dir/spawn.out" 2> "$dir/spawn.err" \
+    || fail "real Firstmate-project worker spawn failed: $(cat "$dir/spawn.err")"
+  meta="$home/state/$id.meta"
+  project_workspace=$(grep '^herdr_workspace_id=' "$meta" | cut -d= -f2-)
+  [ -n "$project_workspace" ] && [ "$project_workspace" != native ] \
+    || fail "Firstmate project worker reused the native primary workspace"
+  [ "$(grep '^herdr_workspace_label=' "$meta")" = 'herdr_workspace_label=firstmate · project' ] \
+    || fail "Firstmate project worker did not publish the project role"
+  [ "$(jq -r --arg workspace "$project_workspace" '.workspaces[] | select(.workspace_id == $workspace) | .label' "$state")" = 'firstmate · project' ] \
+    || fail "real worker spawn did not create the distinct Firstmate project workspace"
+  [ "$(jq -c '
+    {workspace:(.workspaces[]|select(.workspace_id=="native")),
+     tab:(.tabs[]|select(.tab_id=="native:t1")),
+     pane:(.panes[]|select(.pane_id=="native:p1"))}
+  ' "$state")" = "$native_after" ] || fail "real worker spawn mutated the converged native primary tuple"
+  pass "Herdr full spawn: native primary and Firstmate project remain distinct"
+}
+
+prepare_full_projection_case() {  # <dir> <version> <focus-child:0|1> <fail-reclaim-label:0|1>
+  local dir=$1 version=$2 focus_child=$3 fail_label=$4 task_label parent_focus child_focus
+  FULL_ID="projection-v${version}-${focus_child}-${fail_label}-$$"
+  FULL_HOME="$dir/home"
+  FULL_PROJECT="$dir/payments"
+  FULL_WORKTREE="$dir/worktree"
+  FULL_TOKEN=AbCdEfGhIjKlMnOpQrStUv
+  FULL_CHILD_LABEL="└ $FULL_ID · p:$FULL_TOKEN"
+  FULL_PARENT_LABEL='payments · primary'
+  make_project_and_worktree "$FULL_PROJECT" "$FULL_WORKTREE" \
+    || fail "could not create v$version full-spawn project fixture"
+  make_worker_home "$FULL_HOME" "$FULL_ID"
+  : > "$FULL_HOME/config/herdr-presentation-spaces"
+  FULL_FAKE=$(make_stateful_herdr "$dir")
+  FULL_STATE="$dir/state.json"
+  FULL_LOG="$dir/herdr.log"
+  task_label="$FULL_ID · worker"
+  [ "$version" != 2 ] || task_label="fm-$FULL_ID"
+  parent_focus=true; child_focus=false
+  if [ "$focus_child" = 1 ]; then parent_focus=false; child_focus=true; fi
+  # shellcheck disable=SC2016  # jq variables, not shell expansion
+  state_update "$FULL_STATE" \
+    --arg project "$FULL_PROJECT" --arg worktree "$FULL_WORKTREE" \
+    --arg parent_label "$FULL_PARENT_LABEL" --arg child_label "$FULL_CHILD_LABEL" \
+    --arg task_label "$task_label" --argjson parent_focus "$parent_focus" \
+    --argjson child_focus "$child_focus" --argjson fail_label "$fail_label" '
+      .next = 20
+      | .workspaces = [
+          {workspace_id:"parent",label:$parent_label,focused:$parent_focus,active_tab_id:"parent:t0"},
+          {workspace_id:"child",label:$child_label,focused:$child_focus,active_tab_id:"child:t1"}
+        ]
+      | .tabs = [
+          {workspace_id:"parent",tab_id:"parent:t0",label:"anchor · worker",focused:$parent_focus},
+          {workspace_id:"child",tab_id:"child:t1",label:$task_label,focused:$child_focus}
+        ]
+      | .panes = [
+          {workspace_id:"parent",tab_id:"parent:t0",pane_id:"parent:p0",label:"anchor · worker",cwd:$project,foreground_cwd:$project},
+          {workspace_id:"child",tab_id:"child:t1",pane_id:"child:p1",label:$task_label,cwd:$project,foreground_cwd:$worktree}
+        ]
+      | .faults.fail_next_tab_rename = ($fail_label == 1)
+    '
+  write_full_projected_meta "$FULL_HOME/state/$FULL_ID.meta" "$FULL_ID" \
+    "$FULL_PROJECT" "$FULL_WORKTREE" child child:t1 child:p1 \
+    "$FULL_CHILD_LABEL" "$task_label"
+  FULL_JOURNAL="$FULL_HOME/state/$FULL_ID.herdr-presentation"
+  case "$version" in
+    1)
+      printf '%s\n' 'version=1' "task_id=$FULL_ID" "projection_id=$FULL_TOKEN" > "$FULL_JOURNAL"
+      ;;
+    2)
+      printf '%s\n' \
+        'version=2' "task_id=$FULL_ID" "projection_id=$FULL_TOKEN" \
+        "home=$(cd "$FULL_HOME" && pwd -P)" 'session=fmtest' \
+        'workspace_id=child' 'tab_id=child:t1' 'pane_id=child:p1' \
+        'parent_workspace_id=parent' "parent_label=$FULL_PARENT_LABEL" \
+        "workspace_label=$FULL_CHILD_LABEL" "task_label=$task_label" > "$FULL_JOURNAL"
+      ;;
+    3)
+      printf '%s\n' \
+        'version=3' "task_id=$FULL_ID" 'task_kind=ship' "projection_id=$FULL_TOKEN" \
+        "home=$(cd "$FULL_HOME" && pwd -P)" 'session=fmtest' \
+        'workspace_id=child' 'tab_id=child:t1' 'pane_id=child:p1' \
+        'parent_workspace_id=parent' "parent_label=$FULL_PARENT_LABEL" \
+        "workspace_label=$FULL_CHILD_LABEL" "task_label=$task_label" > "$FULL_JOURNAL"
+      ;;
+    *) fail "unsupported full projection fixture version $version" ;;
+  esac
+  : > "$FULL_LOG"
+}
+
+# Drive complete fm-spawn.sh v1, v2, and v3 recovery paths. V1 excludes its
+# token-bound child. V2 refuses active-tab reclaim before mutation. V3 rolls
+# back a replacement whose label response fails. Every path then creates in or
+# selects only a lawful flat parent and never enters or closes the old child.
+test_real_spawn_projection_fallback_and_reclaim_refusals() {
+  local dir meta final_workspace calls
+
+  dir="$TMP_ROOT/full-v1-fallback"
+  prepare_full_projection_case "$dir" 1 1 0
+  run_real_worker_spawn "$FULL_ID" "$FULL_HOME" "$FULL_PROJECT" "$FULL_WORKTREE" \
+    "$FULL_FAKE" "$FULL_STATE" "$FULL_LOG" > "$dir/out" 2> "$dir/err" \
+    || fail "real v1 flat fallback failed: $(cat "$dir/err")"
+  meta="$FULL_HOME/state/$FULL_ID.meta"
+  final_workspace=$(grep '^herdr_workspace_id=' "$meta" | cut -d= -f2-)
+  [ -n "$final_workspace" ] && [ "$final_workspace" != child ] && [ "$final_workspace" != parent ] \
+    || fail "real v1 fallback adopted its child or unowned prior-label parent"
+  assert_old_projection_untouched "$FULL_STATE" "$FULL_LOG" child child:t1 child:p1 "$FULL_CHILD_LABEL"
+
+  dir="$TMP_ROOT/full-v2-prior-parent"
+  prepare_full_projection_case "$dir" 2 1 0
+  run_real_worker_spawn "$FULL_ID" "$FULL_HOME" "$FULL_PROJECT" "$FULL_WORKTREE" \
+    "$FULL_FAKE" "$FULL_STATE" "$FULL_LOG" > "$dir/out" 2> "$dir/err" \
+    || fail "real v2 prior-parent fallback failed: $(cat "$dir/err")"
+  meta="$FULL_HOME/state/$FULL_ID.meta"
+  [ "$(grep '^herdr_workspace_id=' "$meta")" = herdr_workspace_id=parent ] \
+    || fail "real v2 prior-parent fallback did not select the exact journal parent"
+  [ "$(jq -r '.workspaces[] | select(.workspace_id == "parent") | .label' "$FULL_STATE")" = 'payments · project' ] \
+    || fail "real v2 fallback did not migrate only its exact prior-label parent"
+  assert_old_projection_untouched "$FULL_STATE" "$FULL_LOG" child child:t1 child:p1 "$FULL_CHILD_LABEL"
+
+  dir="$TMP_ROOT/full-v2-active-refusal"
+  prepare_full_projection_case "$dir" 2 1 0
+  state_update "$FULL_STATE" '(.workspaces[] | select(.workspace_id == "parent") | .label) = "payments · project"'
+  perl -pi -e 's/^parent_label=.*/parent_label=payments · project/' "$FULL_JOURNAL"
+  run_real_worker_spawn "$FULL_ID" "$FULL_HOME" "$FULL_PROJECT" "$FULL_WORKTREE" \
+    "$FULL_FAKE" "$FULL_STATE" "$FULL_LOG" > "$dir/out" 2> "$dir/err" \
+    || fail "real v2 active-tab reclaim refusal did not fall back: $(cat "$dir/err")"
+  meta="$FULL_HOME/state/$FULL_ID.meta"
+  [ "$(grep '^herdr_workspace_id=' "$meta")" = herdr_workspace_id=parent ] \
+    || fail "real v2 fallback did not select the exact journal parent"
+  grep -F 'would replace the active tab; spawning flat' "$dir/err" >/dev/null \
+    || fail "real v2 fixture did not exercise active-tab reclaim refusal: $(cat "$dir/err")"
+  assert_old_projection_untouched "$FULL_STATE" "$FULL_LOG" child child:t1 child:p1 "$FULL_CHILD_LABEL"
+
+  dir="$TMP_ROOT/full-v3-label-rollback"
+  prepare_full_projection_case "$dir" 3 0 1
+  state_update "$FULL_STATE" '(.workspaces[] | select(.workspace_id == "parent") | .label) = "payments · project"'
+  perl -pi -e 's/^parent_label=.*/parent_label=payments · project/' "$FULL_JOURNAL"
+  run_real_worker_spawn "$FULL_ID" "$FULL_HOME" "$FULL_PROJECT" "$FULL_WORKTREE" \
+    "$FULL_FAKE" "$FULL_STATE" "$FULL_LOG" > "$dir/out" 2> "$dir/err" \
+    || fail "real v3 replacement-label refusal did not fall back: $(cat "$dir/err")"
+  meta="$FULL_HOME/state/$FULL_ID.meta"
+  [ "$(grep '^herdr_workspace_id=' "$meta")" = herdr_workspace_id=parent ] \
+    || fail "real v3 fallback did not select the exact journal parent"
+  [ "$(jq -r '.faults.fail_next_tab_rename // false' "$FULL_STATE")" = false ] \
+    || fail "real v3 fixture did not consume its reclaim label fault: $(cat "$dir/err")"
+  calls=$(cat "$FULL_LOG")
+  assert_contains "$calls" "tab"$'\037'"create"$'\037'"--workspace"$'\037'"child" \
+    "real v3 fixture did not reach replacement creation inside the exact child"
+  grep -F 'could not verify its replacement labels; spawning flat' "$dir/err" >/dev/null \
+    || fail "real v3 fixture did not report the label-verification refusal"
+  assert_old_projection_untouched "$FULL_STATE" "$FULL_LOG" child child:t1 child:p1 "$FULL_CHILD_LABEL"
+  pass "Herdr full spawn: v1 and v2/v3 fallback never adopts or enters the old projected child"
+}
+
+# Missing, foreign-label, and duplicate exact parents must refuse in both v2
+# and v3 after reclaim declines, before any create, rename, close, or launch.
+test_real_spawn_exact_journal_parent_refusals() {
+  local version layout dir before after out status mutations
+  for version in 2 3; do
+    for layout in missing foreign duplicate; do
+      dir="$TMP_ROOT/full-v${version}-parent-$layout"
+      prepare_full_projection_case "$dir" "$version" 1 0
+      case "$layout" in
+        missing) state_update "$FULL_STATE" '.workspaces |= [.[] | select(.workspace_id != "parent")] | .tabs |= [.[] | select(.workspace_id != "parent")] | .panes |= [.[] | select(.workspace_id != "parent")]' ;;
+        foreign) state_update "$FULL_STATE" '(.workspaces[] | select(.workspace_id == "parent") | .label) = "foreign"' ;;
+        duplicate) state_update "$FULL_STATE" '.workspaces += [{workspace_id:"parent",label:"payments · primary",focused:false,active_tab_id:"parent:t0"}]' ;;
+      esac
+      before=$(cksum < "$FULL_HOME/state/$FULL_ID.meta")
+      out=$(run_real_worker_spawn "$FULL_ID" "$FULL_HOME" "$FULL_PROJECT" "$FULL_WORKTREE" \
+        "$FULL_FAKE" "$FULL_STATE" "$FULL_LOG" 2>&1); status=$?
+      [ "$status" -ne 0 ] || fail "v$version $layout exact journal parent unexpectedly launched"
+      after=$(cksum < "$FULL_HOME/state/$FULL_ID.meta")
+      [ "$after" = "$before" ] || fail "v$version $layout refusal replaced projected metadata"
+      mutations=$(awk -F $'\037' '
+        (($1 == "workspace" && ($2 == "create" || $2 == "rename")) ||
+         ($1 == "tab" && ($2 == "create" || $2 == "rename" || $2 == "close")) ||
+         ($1 == "pane" && ($2 == "rename" || $2 == "close" || $2 == "run"))) { print }
+      ' "$FULL_LOG")
+      [ -z "$mutations" ] || fail "v$version $layout exact parent refusal mutated Herdr: $mutations"
+      assert_old_projection_untouched "$FULL_STATE" "$FULL_LOG" child child:t1 child:p1 "$FULL_CHILD_LABEL"
+      assert_contains "$out" 'failed to ensure herdr workspace' \
+        "v$version $layout exact parent refusal did not stop in flat-parent resolution"
+    done
+  done
+  pass "Herdr full spawn: v2/v3 exact journal parent rules refuse missing, foreign, and duplicate ids"
 }
 
 # A v1 journal has no parent id. Its projected task record is excluded from
@@ -135,6 +704,140 @@ test_v2_v3_flat_fallback_uses_exact_parent() {
     assert_not_contains "$calls" $'workspace\037rename' "$layout exact parent refusal renamed a workspace"
   done
   pass "Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent"
+}
+
+make_secondmate_home() {  # <home> <id>
+  mkdir -p "$1/bin" "$1/state" "$1/config" "$1/data" "$1/projects"
+  printf '%s\n' "$2" > "$1/.fm-secondmate-home"
+  printf '# Safe temporary Firstmate second-mate fixture.\n' > "$1/AGENTS.md"
+  printf 'Safe second-mate spawn fixture.\n' > "$1/data/charter.md"
+}
+
+run_real_secondmate_spawn() {  # <id> <primary-home> <child-home> <fakebin> <state> <log> [fail-path] [fail-marker]
+  local id=$1 primary=$2 child=$3 fake=$4 state=$5 log=$6 fail_path=${7:-} fail_marker=${8:-}
+  track_task_tmp "$id"
+  PATH="$fake:$BASE_PATH" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" HERDR_SESSION=fmtest \
+    FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" FM_FAKE_HERDR_WORKTREE="$child" \
+    FM_TEST_FAIL_PUBLIC_PATH="$fail_path" FM_TEST_FAIL_MARKER="$fail_marker" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$child" "sh -c 'true'" --secondmate --backend herdr
+}
+
+prepare_real_secondmate_publication_crash() {  # <dir> <case-suffix>
+  local dir=$1 suffix=$2 out status
+  SM_ID="sm-${suffix}-$$"
+  SM_PRIMARY="$dir/primary-home"
+  SM_CHILD="$dir/child-home"
+  mkdir -p "$SM_PRIMARY/state" "$SM_PRIMARY/config" "$SM_PRIMARY/data"
+  make_secondmate_home "$SM_CHILD" "$SM_ID"
+  SM_FAKE=$(make_stateful_herdr "$dir")
+  SM_STATE="$dir/state.json"
+  SM_LOG="$dir/herdr.log"
+  SM_PARENT="$SM_CHILD/state/.herdr-parent.meta"
+  SM_PUBLIC="$SM_PRIMARY/state/$SM_ID.meta"
+  SM_FAIL_MARKER="$dir/primary-publication-failed"
+  out=$(run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+    "$SM_FAKE" "$SM_STATE" "$SM_LOG" "$SM_PUBLIC" "$SM_FAIL_MARKER" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "$suffix first second-mate spawn did not stop at primary publication"
+  [ -e "$SM_FAIL_MARKER" ] || fail "$suffix fault did not reach primary metadata publication"
+  [ -f "$SM_PARENT" ] && [ ! -L "$SM_PARENT" ] \
+    || fail "$suffix fault occurred before real child-home parent publication"
+  [ ! -e "$SM_PUBLIC" ] && [ ! -L "$SM_PUBLIC" ] \
+    || fail "$suffix fault unexpectedly published primary metadata"
+  SM_OLD_WORKSPACE=$(grep '^herdr_workspace_id=' "$SM_PARENT" | cut -d= -f2-)
+  SM_OLD_TAB=$(grep '^herdr_tab_id=' "$SM_PARENT" | cut -d= -f2-)
+  SM_OLD_PANE=$(grep '^herdr_pane_id=' "$SM_PARENT" | cut -d= -f2-)
+  [ -n "$SM_OLD_WORKSPACE" ] && [ -n "$SM_OLD_TAB" ] && [ -n "$SM_OLD_PANE" ] \
+    || fail "$suffix parent publication omitted its exact tuple"
+}
+
+# Fault after the real child-home parent publication and before the primary
+# publication, then retry the same full spawn. Only the exact one-pane,
+# no-agent husk may be replaced, and both records must converge on the new tuple.
+test_real_secondmate_publication_crash_retry() {
+  local dir retry_start retry_calls new_tab new_pane
+  dir="$TMP_ROOT/full-secondmate-retry"
+  prepare_real_secondmate_publication_crash "$dir" retry
+  retry_start=$(wc -l < "$SM_LOG" | tr -d '[:space:]')
+  run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+    "$SM_FAKE" "$SM_STATE" "$SM_LOG" > "$dir/retry.out" 2> "$dir/retry.err" \
+    || fail "same real second-mate spawn did not recover its exact publication husk: $(cat "$dir/retry.err")"
+  [ -f "$SM_PUBLIC" ] && [ -f "$SM_PARENT" ] \
+    || fail "second-mate retry did not publish both complete records"
+  new_tab=$(grep '^herdr_tab_id=' "$SM_PUBLIC" | cut -d= -f2-)
+  new_pane=$(grep '^herdr_pane_id=' "$SM_PUBLIC" | cut -d= -f2-)
+  [ "$new_tab" != "$SM_OLD_TAB" ] && [ "$new_pane" != "$SM_OLD_PANE" ] \
+    || fail "second-mate retry reused the old publication husk tuple"
+  [ "$(grep '^herdr_workspace_id=' "$SM_PUBLIC")" = "$(grep '^herdr_workspace_id=' "$SM_PARENT")" ] \
+    && [ "$(grep '^herdr_tab_id=' "$SM_PUBLIC")" = "$(grep '^herdr_tab_id=' "$SM_PARENT")" ] \
+    && [ "$(grep '^herdr_pane_id=' "$SM_PUBLIC")" = "$(grep '^herdr_pane_id=' "$SM_PARENT")" ] \
+    || fail "second-mate retry published different primary and parent tuples"
+  retry_calls=$(sed -n "$((retry_start + 1)),\$p" "$SM_LOG")
+  assert_contains "$retry_calls" "tab"$'\037'"close"$'\037'"$SM_OLD_TAB" \
+    "second-mate retry did not close only its exact old husk tab"
+  assert_not_contains "$retry_calls" "pane"$'\037'"close"$'\037'"$SM_OLD_PANE" \
+    "second-mate retry closed the old pane directly instead of its exact tab"
+  jq -e --arg old "$SM_OLD_PANE" --arg new "$new_pane" '
+    ([.panes[] | select(.pane_id == $old)] | length) == 0
+    and ([.panes[] | select(.pane_id == $new)] | length) == 1
+  ' "$SM_STATE" >/dev/null || fail "second-mate retry did not leave exactly the replacement pane"
+  pass "Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk"
+}
+
+# Recreate the same real parent-first fault, then disconfirm recovery rights for
+# a live agent, wrong identity, symlink record, extra pane, and foreign
+# same-label tab. Every retry must stop before create, rename, close, or launch.
+test_real_secondmate_parent_recovery_disconfirming_cases() {
+  local mode dir retry_start out status retry_calls mutations saved
+  for mode in live-agent wrong-identity symlink extra-pane foreign-same-label; do
+    dir="$TMP_ROOT/full-secondmate-$mode"
+    prepare_real_secondmate_publication_crash "$dir" "${mode//-/_}"
+    case "$mode" in
+      live-agent)
+        # shellcheck disable=SC2016  # jq variable, not shell expansion
+        state_update "$SM_STATE" --arg pane "$SM_OLD_PANE" '.agents[$pane] = "idle"'
+        ;;
+      wrong-identity)
+        perl -pi -e 's/^task_id=.*/task_id=foreign/' "$SM_PARENT"
+        ;;
+      symlink)
+        saved="$dir/real-parent.meta"
+        cp "$SM_PARENT" "$saved"
+        rm -f "$SM_PARENT"
+        ln -s "$saved" "$SM_PARENT"
+        ;;
+      extra-pane)
+        # shellcheck disable=SC2016  # jq variables, not shell expansion
+        state_update "$SM_STATE" --arg workspace "$SM_OLD_WORKSPACE" --arg tab "$SM_OLD_TAB" \
+          --arg home "$SM_CHILD" '
+          .panes += [{workspace_id:$workspace,tab_id:$tab,pane_id:"foreign:extra-pane",label:"foreign",cwd:$home,foreground_cwd:$home}]
+        '
+        ;;
+      foreign-same-label)
+        # shellcheck disable=SC2016  # jq variables, not shell expansion
+        state_update "$SM_STATE" --arg workspace "$SM_OLD_WORKSPACE" --arg home "$SM_CHILD" \
+          --arg label "$SM_ID · second mate" '
+          .tabs += [{workspace_id:$workspace,tab_id:"foreign:same-label",label:$label,focused:false}]
+          | .panes += [{workspace_id:$workspace,tab_id:"foreign:same-label",pane_id:"foreign:same-label-pane",label:$label,cwd:$home,foreground_cwd:$home}]
+        '
+        ;;
+    esac
+    retry_start=$(wc -l < "$SM_LOG" | tr -d '[:space:]')
+    out=$(run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+      "$SM_FAKE" "$SM_STATE" "$SM_LOG" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "$mode second-mate parent recovery unexpectedly launched"
+    [ ! -e "$SM_PUBLIC" ] && [ ! -L "$SM_PUBLIC" ] \
+      || fail "$mode refusal published primary metadata"
+    retry_calls=$(sed -n "$((retry_start + 1)),\$p" "$SM_LOG")
+    mutations=$(printf '%s\n' "$retry_calls" | awk -F $'\037' '
+      (($1 == "workspace" && ($2 == "create" || $2 == "rename")) ||
+       ($1 == "tab" && ($2 == "create" || $2 == "rename" || $2 == "close")) ||
+       ($1 == "pane" && ($2 == "rename" || $2 == "close" || $2 == "run"))) { print }
+    ')
+    [ -z "$mutations" ] || fail "$mode second-mate refusal mutated Herdr: $mutations"
+    [ -n "$out" ] || fail "$mode second-mate refusal returned no diagnostic"
+  done
+  pass "Herdr full spawn: unsafe second-mate parent evidence refuses before mutation"
 }
 
 write_parent_record() {  # <home> <id> <workspace> <tab> <pane>
@@ -364,6 +1067,11 @@ test_spawn_wiring_keeps_recovery_channels_separate() {
   pass "Herdr spawn recovery: flat, task, and parent evidence channels remain separate"
 }
 
+test_real_spawn_keeps_native_primary_and_firstmate_project_distinct
+test_real_spawn_projection_fallback_and_reclaim_refusals
+test_real_spawn_exact_journal_parent_refusals
+test_real_secondmate_publication_crash_retry
+test_real_secondmate_parent_recovery_disconfirming_cases
 test_v1_flat_fallback_excludes_projected_child
 test_v2_v3_flat_fallback_uses_exact_parent
 test_secondmate_parent_only_recovery

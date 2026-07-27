@@ -206,12 +206,13 @@ Observed guarantees included:
 ```text
 ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
 ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
-ok - real Herdr lab: session lock contention from a secondmate home falls back flat with no journal
+ok - real Herdr lab: session lock contention from a secondmate home refuses without a journal
 ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
 ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority
 ok - real Herdr lab validation completed on Herdr 0.7.4 with the default-session tripwire intact
 ```
 
+Projection selection falls back to the flat path under sustained lock contention, but the later flat create requires that same named-session mutation lock and refuses while contention persists.
 The suite also covers lost or failed move responses, active-tab refusal, restart husks, missing and duplicate tokens, manual renames, concurrent cleanup, and exact focus restoration.
 
 The mandatory projection suite ran again on 2026-07-24 against Herdr 0.7.5 protocol 16:

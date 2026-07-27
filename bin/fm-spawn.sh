@@ -41,19 +41,23 @@
 #   is absent; it stays a separate argument and gains no projection authority.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority. Treehouse allocation is unchanged. A Herdr task candidate is
-#   created mode 0600 in state/, validated with the fixed shared-session alias,
-#   and renamed over the public path from the same directory. A second-mate
-#   parent record publishes first; the primary record publishes second; their
-#   exact tuple is compared before launch. Every non-Herdr path keeps direct
-#   publication.
+#   created mode 0600 in state/, validated against the complete fresh-spawn
+#   schema and fixed shared-session alias, and atomically renamed over an absent
+#   or regular non-symlink public path from the same directory. The final public
+#   regular file, complete schema, and candidate checksum are verified. A
+#   second-mate parent record publishes first; the primary record publishes
+#   second; their exact tuple is compared before launch. Every non-Herdr path
+#   keeps direct publication.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one presentation-order lock keyed only by the globally unique physical
-#   running socket, outside any home's state/, through launch handoff. Lock
-#   contention warns and falls back to the ordinary flat layout before any
-#   projection mutation. The exact response-derived new workspace is inserted
-#   immediately after its owning parent (firstmate or 2ndmate-<id>) contiguous
-#   child block. Ordering never authorizes lifecycle cleanup, and any
-#   unavailable, ambiguous, or failed move warns while the spawn continues.
+#   running socket, outside any home's state/, through launch handoff. Sustained
+#   contention makes projection selection fall back to the ordinary flat path
+#   before any projection mutation. Flat task creation then requires that same
+#   session mutation lock and refuses while contention persists. The exact
+#   response-derived new workspace is inserted immediately after its owning
+#   parent (firstmate or 2ndmate-<id>) contiguous child block. Ordering never
+#   authorizes lifecycle cleanup, and any unavailable, ambiguous, or failed move
+#   warns while the spawn continues.
 #   Every projected create, prune, and move captures and verifies the named
 #   session's exact active workspace and tab. A detected focus change restores
 #   only that exact tab id; an ambiguous pre-operation snapshot refuses the
@@ -262,25 +266,90 @@ parse_orca_worktree_result() {
   fi
 }
 
+spawn_herdr_metadata_field_once() {  # <metadata-file> <field>
+  local meta=$1 field=$2 count
+  count=$(grep -c "^${field}=" "$meta" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${field}=" "$meta" 2>/dev/null | cut -d= -f2-
+}
+
+# Validate the complete Herdr task schema emitted by this fresh-spawn owner.
+# The backend validator owns Herdr identity and display-field syntax; this
+# producer additionally requires every common spawn field, every current Herdr
+# display field, exact target/label relations, and the second-mate-only suffix.
+spawn_herdr_metadata_validate_fresh_spawn() {  # <metadata-file>
+  local meta=$1 field value kind mode yolo session pane window display tab_label pane_label
+  fm_backend_herdr_metadata_validate_record "$meta" || return 1
+  [ "$(spawn_herdr_metadata_field_once "$meta" backend 2>/dev/null)" = herdr ] || return 1
+  for field in window worktree project harness kind mode yolo tasktmp model effort \
+    herdr_session herdr_session_display_label herdr_workspace_id herdr_tab_id \
+    herdr_pane_id display_label herdr_workspace_label herdr_tab_label herdr_pane_label; do
+    value=$(spawn_herdr_metadata_field_once "$meta" "$field") || return 1
+    case "$field" in
+      window|worktree|project|harness|kind|mode|yolo|tasktmp|model|effort|display_label|herdr_workspace_label|herdr_tab_label|herdr_pane_label)
+        [ -n "$value" ] || return 1
+        ;;
+    esac
+  done
+  kind=$(spawn_herdr_metadata_field_once "$meta" kind) || return 1
+  mode=$(spawn_herdr_metadata_field_once "$meta" mode) || return 1
+  yolo=$(spawn_herdr_metadata_field_once "$meta" yolo) || return 1
+  case "$kind" in
+    ship|scout)
+      case "$mode" in no-mistakes|direct-PR|local-only) ;; *) return 1 ;; esac
+      case "$yolo" in on|off) ;; *) return 1 ;; esac
+      [ "$(grep -c '^home=' "$meta" 2>/dev/null || true)" = 0 ] || return 1
+      [ "$(grep -c '^projects=' "$meta" 2>/dev/null || true)" = 0 ] || return 1
+      ;;
+    secondmate)
+      [ "$mode" = secondmate ] && [ "$yolo" = off ] || return 1
+      value=$(spawn_herdr_metadata_field_once "$meta" home) || return 1
+      [ -n "$value" ] || return 1
+      [ "$value" = "$(spawn_herdr_metadata_field_once "$meta" project)" ] \
+        && [ "$value" = "$(spawn_herdr_metadata_field_once "$meta" worktree)" ] || return 1
+      spawn_herdr_metadata_field_once "$meta" projects >/dev/null || return 1
+      ;;
+    *) return 1 ;;
+  esac
+  session=$(spawn_herdr_metadata_field_once "$meta" herdr_session) || return 1
+  pane=$(spawn_herdr_metadata_field_once "$meta" herdr_pane_id) || return 1
+  window=$(spawn_herdr_metadata_field_once "$meta" window) || return 1
+  [ "$window" = "$session:$pane" ] || return 1
+  [ "$(spawn_herdr_metadata_field_once "$meta" herdr_session_display_label)" \
+    = "$(fm_backend_herdr_session_display_label)" ] || return 1
+  display=$(spawn_herdr_metadata_field_once "$meta" display_label) || return 1
+  tab_label=$(spawn_herdr_metadata_field_once "$meta" herdr_tab_label) || return 1
+  pane_label=$(spawn_herdr_metadata_field_once "$meta" herdr_pane_label) || return 1
+  [ "$display" = "$tab_label" ] && [ "$display" = "$pane_label" ]
+}
+
 # Publish one complete Herdr task record from a mode-0600 same-directory
-# candidate. Validation and the fixed shared-session alias are checked before
-# one rename. The public path is therefore absent, its prior complete record,
-# or the complete candidate; validation and rename failures never expose
-# partial candidate bytes. Candidate creation and trap cleanup remain owned by
-# the caller. Non-Herdr publication never calls this helper.
+# candidate. An existing public path must be a regular non-symlink file; an
+# absent path is allowed. Complete producer-schema validation precedes one
+# same-directory rename. The final path must be a regular non-symlink file with
+# the exact candidate checksum, and the private name must be gone. Validation
+# and rename failures therefore preserve an absent path or the prior complete
+# record. Candidate creation and trap cleanup remain owned by the caller.
+# Non-Herdr publication never calls this helper.
 spawn_herdr_metadata_publish() {  # <private-candidate> <public-path>
-  local candidate=$1 public=$2 candidate_dir public_dir candidate_real public_real
+  local candidate=$1 public=$2 candidate_dir public_dir candidate_real public_real candidate_sum public_sum
   [ -f "$candidate" ] && [ ! -L "$candidate" ] || return 1
   candidate_dir=$(dirname "$candidate") || return 1
   public_dir=$(dirname "$public") || return 1
   candidate_real=$(cd "$candidate_dir" 2>/dev/null && pwd -P) || return 1
   public_real=$(cd "$public_dir" 2>/dev/null && pwd -P) || return 1
   [ "$candidate_real" = "$public_real" ] || return 1
-  [ ! -L "$public" ] || return 1
-  fm_backend_herdr_metadata_validate_record "$candidate" || return 1
-  [ "$(fm_backend_herdr_meta_field_exact "$candidate" herdr_session_display_label)" \
-    = "$(fm_backend_herdr_session_display_label)" ] || return 1
-  mv -f "$candidate" "$public"
+  if [ -e "$public" ] || [ -L "$public" ]; then
+    [ -f "$public" ] && [ ! -L "$public" ] || return 1
+  fi
+  spawn_herdr_metadata_validate_fresh_spawn "$candidate" || return 1
+  candidate_sum=$(cksum < "$candidate") || return 1
+  mv -f "$candidate" "$public" || return 1
+  [ ! -e "$candidate" ] && [ ! -L "$candidate" ] || return 1
+  [ -f "$public" ] && [ ! -L "$public" ] || return 1
+  spawn_herdr_metadata_validate_fresh_spawn "$public" || return 1
+  public_sum=$(cksum < "$public") || return 1
+  [ "$public_sum" = "$candidate_sum" ]
 }
 
 # A second-mate launch publishes its child-home parent record first and its

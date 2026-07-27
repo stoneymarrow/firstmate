@@ -281,12 +281,14 @@ test_peek_display_and_raw_pipe() {
 
 # The extracted spawn publisher is exercised with a blocking PATH-injected mv.
 # A concurrent reader sees only the old complete record until rename, then the
-# complete validated candidate. Validation and rename failures preserve old bytes.
+# complete fresh-spawn candidate. Unsafe destinations, incomplete schema,
+# validation/rename failure, and a false-success rename cannot report publish.
 test_atomic_metadata_publication_behavior() {
-  local dir fake helper public candidate old_bytes pid out status source
+  local dir fake helper public candidate old_bytes pid out status source symlink_target
   dir="$TMP_ROOT/atomic-publication"; fake="$dir/bin"; mkdir -p "$fake" "$dir/state"
-  helper=$(sed -n '/^spawn_herdr_metadata_publish()/,/^}/p' "$ROOT/bin/fm-spawn.sh")
-  [ -n "$helper" ] || fail "spawn Herdr publication helper is missing"
+  helper=$(sed -n '/^spawn_herdr_metadata_field_once()/,/^spawn_herdr_secondmate_publications_match()/p' \
+    "$ROOT/bin/fm-spawn.sh" | sed '$d')
+  [ -n "$helper" ] || fail "spawn Herdr publication helpers are missing"
   cat > "$fake/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
@@ -297,27 +299,48 @@ case "${FM_TEST_MV_MODE:-pass}" in
     exec /bin/mv "$@"
     ;;
   fail) exit 1 ;;
+  noop) exit 0 ;;
+  symlink)
+    candidate=${2:-}
+    public=${3:-}
+    /bin/rm -f "$candidate" "$public"
+    /bin/ln -s "$FM_TEST_MV_SYMLINK_TARGET" "$public"
+    ;;
   *) exec /bin/mv "$@" ;;
 esac
 SH
   chmod +x "$fake/mv"
   public="$dir/state/task.meta"
   candidate="$dir/state/.task.meta.spawn.candidate"
-  printf '%s\n' 'old=complete' > "$public"
-  old_bytes=$(cat "$public")
-  cat > "$candidate" <<'EOF'
+
+  write_complete_candidate() {
+    cat > "$candidate" <<'EOF'
 window=shared:w1:p1
 worktree=/tmp/worktree
 project=/tmp/project
 harness=pi
 kind=ship
+mode=no-mistakes
+yolo=off
+tasktmp=/tmp/fm-task
+model=default
+effort=default
 backend=herdr
 herdr_session=shared
 herdr_session_display_label=Shared Herdr session
 herdr_workspace_id=w1
 herdr_tab_id=w1:t1
 herdr_pane_id=w1:p1
+display_label=task · worker
+herdr_workspace_label=project · project
+herdr_tab_label=task · worker
+herdr_pane_label=task · worker
 EOF
+  }
+
+  printf '%s\n' 'old=complete' > "$public"
+  old_bytes=$(cat "$public")
+  write_complete_candidate
   (
     PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=block \
       FM_TEST_MV_READY="$dir/ready" FM_TEST_MV_RELEASE="$dir/release" \
@@ -333,15 +356,38 @@ EOF
   grep -qx 'herdr_pane_id=w1:p1' "$public" || fail "reader did not observe the complete candidate after rename"
   [ "$(grep -c '^backend=herdr$' "$public")" = 1 ] || fail "published candidate was incomplete"
 
-  printf '%s\n' 'old=complete' > "$public"
-  printf '%s\n' 'backend=herdr' > "$candidate"
+  rm -f "$public"
+  write_complete_candidate
+  PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" \
+    || fail "absent Herdr public destination was refused"
+  [ -f "$public" ] && [ ! -L "$public" ] || fail "absent destination did not publish one regular file"
+
+  rm -f "$public" "$candidate"
+  mkdir "$public"
+  write_complete_candidate
   out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
     FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
     bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "malformed Herdr candidate was published"
-  [ "$(cat "$public")" = 'old=complete' ] || fail "malformed validation changed public metadata"
+  [ "$status" -ne 0 ] || fail "directory Herdr public destination was accepted"
+  [ -f "$candidate" ] && [ ! -e "$public/$(basename "$candidate")" ] \
+    || fail "directory refusal moved the candidate inside the destination"
+  rmdir "$public"
 
+  symlink_target="$dir/state/symlink-target"
+  printf 'old=target\n' > "$symlink_target"
+  ln -s "$symlink_target" "$public"
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "symlink Herdr public destination was accepted"
+  [ -L "$public" ] && [ -f "$candidate" ] || fail "symlink destination refusal changed either path"
+  rm -f "$public"
+
+  printf '%s\n' 'old=complete' > "$public"
   cat > "$candidate" <<'EOF'
 window=shared:w1:p1
 worktree=/tmp/worktree
@@ -355,6 +401,22 @@ herdr_workspace_id=w1
 herdr_tab_id=w1:t1
 herdr_pane_id=w1:p1
 EOF
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "identity-complete but truncated fresh-spawn candidate was published"
+  [ "$(cat "$public")" = 'old=complete' ] || fail "truncated schema validation changed public metadata"
+
+  printf '%s\n' 'backend=herdr' > "$candidate"
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed Herdr candidate was published"
+  [ "$(cat "$public")" = 'old=complete' ] || fail "malformed validation changed public metadata"
+
+  write_complete_candidate
   out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=fail \
     FM_TEST_HELPER="$helper" FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
     bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
@@ -362,12 +424,31 @@ EOF
   [ "$status" -ne 0 ] || fail "injected rename failure reported publication success"
   [ "$(cat "$public")" = 'old=complete' ] || fail "rename failure changed public metadata"
 
+  rm -f "$public"
+  write_complete_candidate
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=noop \
+    FM_TEST_HELPER="$helper" FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "false-success rename without a final public file was accepted"
+  [ ! -e "$public" ] || fail "false-success rename created an unexpected public path"
+
+  write_complete_candidate
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=symlink \
+    FM_TEST_MV_SYMLINK_TARGET="$symlink_target" FM_TEST_HELPER="$helper" \
+    FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "non-regular final Herdr public path was accepted"
+  [ -L "$public" ] || fail "final-public verification fixture did not create its symlink"
+  rm -f "$public"
+
   source=$(<"$ROOT/bin/fm-spawn.sh")
   assert_contains "$source" "META_OUTPUT=\"\$STATE/\$ID.meta\"" \
     "spawn lost the byte-compatible direct non-Herdr publication destination"
   assert_contains "$source" "spawn_herdr_metadata_publish \"\$HERDR_META_TEMP\" \"\$STATE/\$ID.meta\"" \
     "spawn does not route only its Herdr candidate through the atomic publisher"
-  pass "Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures"
+  pass "Herdr metadata: complete-schema atomic publication refuses unsafe and unverifiable public paths"
 }
 
 # A synthetic non-adapter record proves the new fields remain Herdr-only
