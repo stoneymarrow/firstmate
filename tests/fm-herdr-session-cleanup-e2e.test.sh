@@ -84,11 +84,27 @@ ID=restored-idle-shell
 TITLE="└ $ID · p:$TOKEN"
 CANDIDATE=$(lab workspace create --cwd "$ROOT" --label "$TITLE" --no-focus) || fail 'could not create projected child fixture'
 WS=$(printf '%s' "$CANDIDATE" | jq -r '.result.workspace.workspace_id')
+TAB=$(printf '%s' "$CANDIDATE" | jq -r '.result.tab.tab_id')
 PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
+TASK_LABEL="$ID · worker"
+lab tab rename "$TAB" "$TASK_LABEL" >/dev/null || fail 'could not label the exact restored-shell tab fixture'
+lab pane rename "$PANE" "$TASK_LABEL" >/dev/null || fail 'could not label the exact restored-shell pane fixture'
+HOME_REAL=$(cd "$HOME_DIR" && pwd -P)
+ANCHOR_WSID=$(printf '%s' "$ANCHOR" | jq -r '.result.workspace.workspace_id')
 {
-  printf 'version=1\n'
+  printf 'version=3\n'
   printf 'task_id=%s\n' "$ID"
   printf 'projection_id=%s\n' "$TOKEN"
+  printf 'task_kind=ship\n'
+  printf 'home=%s\n' "$HOME_REAL"
+  printf 'session=%s\n' "$HERDR_LAB_SESSION"
+  printf 'workspace_id=%s\n' "$WS"
+  printf 'tab_id=%s\n' "$TAB"
+  printf 'pane_id=%s\n' "$PANE"
+  printf 'parent_workspace_id=%s\n' "$ANCHOR_WSID"
+  printf 'parent_label=captain-anchor\n'
+  printf 'workspace_label=%s\n' "$TITLE"
+  printf 'task_label=%s\n' "$TASK_LABEL"
 } > "$HOME_DIR/state/$ID.herdr-presentation"
 
 "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null || fail 'could not stop named lab for restored-shell reproduction'
@@ -131,7 +147,7 @@ if lab workspace get "$WS" >/dev/null 2>&1; then
   fail 'last-pane side effect did not remove the stale projected child workspace'
 fi
 [ ! -e "$HOME_DIR/state/$ID.herdr-presentation" ] || fail 'matching journal survived confirmed exact pane closure'
-pass 'real named lab cleanup closes only the exact stale pane and preserves exact focus'
+pass 'real named lab cleanup accepts an exact v3 binding, closes only its stale pane, and preserves focus'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \

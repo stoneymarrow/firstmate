@@ -36,11 +36,11 @@ fi
 pass "process proof reads Linux Herdr argv arrays and rejects malformed executable identities"
 
 TOKEN=AbCdEfGhIjKlMnOpQrStUv
-ID=task
+ID=cleanup-task
 WS=w2
 TAB=w2:t1
 PANE=w2:p1
-TITLE="└ task · p:$TOKEN"
+TITLE="└ cleanup-task · p:$TOKEN"
 FIXTURE_DIR="$TMP_ROOT/fixture"
 LOCK_LOG="$TMP_ROOT/locks.log"
 CLOSE_LOG="$TMP_ROOT/closes.log"
@@ -88,7 +88,7 @@ fixture_tabs() {
   i=1
   while [ "$i" -le "$count" ]; do
     [ "$i" -eq 1 ] || printf ','
-    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":false,"label":"fm-task"}' "$WS" "$i" "$WS"
+    printf '{"tab_id":"%s:t%s","workspace_id":"%s","focused":false,"label":"cleanup-task · worker"}' "$WS" "$i" "$WS"
     i=$((i + 1))
   done
   printf ']'
@@ -194,6 +194,21 @@ write_v2() { # <home> <workspace> <tab> <pane>
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
+write_v3() { # <home> <workspace> <tab> <pane>
+  local home=$1 workspace=$2 tab=$3 pane=$4
+  mkdir -p "$home"
+  {
+    printf 'version=3\n'
+    printf 'task_id=%s\n' "$ID"
+    printf 'projection_id=%s\n' "$TOKEN"
+    printf 'task_kind=ship\n'
+    printf 'home=%s\n' "$home"
+    printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$workspace" "$tab" "$pane"
+    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\n' "$TITLE"
+    printf 'task_label=%s · worker\n' "$ID"
+  } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+}
+
 write_cross_home_v2() {
   mkdir -p "$TMP_ROOT/other-home"
   write_v2 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"
@@ -239,7 +254,7 @@ reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$F
 reset_fixture; : > "$FIXTURE_DIR/duplicate-token"; assert_preserved "duplicate token"
 reset_fixture; printf '%s\n' "└ task · p:$TOKEN p:$TOKEN" > "$FIXTURE_DIR/title"; assert_preserved "duplicate title token"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "zero journal match"
-reset_fixture; write_v1 fm-task; assert_preserved "multiple journal matches"
+reset_fixture; write_v1 fm-cleanup-task; assert_preserved "multiple journal matches"
 reset_fixture; rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; write_cross_home_v2; assert_preserved "cross-home journal"
 reset_fixture; write_v2 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v2 workspace binding mismatch"
 reset_fixture; write_v2 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v2 tab binding mismatch"
@@ -249,6 +264,15 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+reset_fixture; write_v3 "$TMP_ROOT/other-home" "$WS" "$TAB" "$PANE"; assert_preserved "cross-home v3 journal"
+reset_fixture; write_v3 "$FM_HOME" w9 "$TAB" "$PANE"; assert_preserved "v3 workspace binding mismatch"
+reset_fixture; write_v3 "$FM_HOME" "$WS" w9:t1 "$PANE"; assert_preserved "v3 tab binding mismatch"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" w9:p1; assert_preserved "v3 pane binding mismatch"
+reset_fixture; write_v3 "$FM_HOME" "$WS" "$TAB" "$PANE"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v3 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v3 cleanup did not close exactly once"
+pass "v3 cleanup applies the same exact home/session/endpoint binding as v2"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
