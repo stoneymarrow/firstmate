@@ -962,18 +962,26 @@ case "$BACKEND" in
     # one case that does: it is the PRIMARY's own fm-spawn.sh process
     # launching a DIFFERENT home (PROJ_ABS, already validated above as the
     # secondmate's home), so FM_HOME here still names the primary. Shadow it
-    # to PROJ_ABS for just these two calls (bash restores it automatically
+    # to PROJ_ABS for the Herdr adapter calls (bash restores it automatically
     # after each prefixed simple-command call) so the secondmate's tab lands
-    # in the secondmate's own workspace, not the primary's "firstmate" one.
+    # in the secondmate's own workspace, not a primary project workspace.
     HERDR_LABEL_HOME=$FM_HOME
+    HERDR_PARENT_META_OUTPUT=""
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
+      HERDR_PARENT_META_OUTPUT="$PROJ_ABS/state/.herdr-parent.meta"
     fi
+    HERDR_HOME_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label "$PROJ_ABS") || exit 1
+    HERDR_TASK_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_task_label "$ID" "$KIND") || exit 1
+    HERDR_WORKSPACE_LABEL=$HERDR_HOME_LABEL
+    HERDR_TAB_LABEL=$HERDR_TASK_LABEL
+    HERDR_PANE_LABEL=$HERDR_TASK_LABEL
+    fm_backend_herdr_metadata_validate_home "$STATE" || exit 1
     HERDR_PRESENTATION_JOURNAL=$(fm_backend_herdr_projection_journal_path "$STATE" "$ID")
     HERDR_PROJECTED=0
     if [ "$KIND" != secondmate ] && [ -f "$CONFIG/herdr-presentation-spaces" ]; then
       HERDR_SES=$(fm_backend_herdr_session)
-      HERDR_PARENT_LABEL=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_workspace_label)
+      HERDR_PARENT_LABEL=$HERDR_HOME_LABEL
       if [ -e "$HERDR_PRESENTATION_JOURNAL" ] || [ -L "$HERDR_PRESENTATION_JOURNAL" ]; then
         fm_backend_herdr_server_ensure "$HERDR_SES" || {
           echo "error: herdr presentation recovery could not ensure its exact named session" >&2
@@ -1043,6 +1051,9 @@ case "$BACKEND" in
             HERDR_PROJECTED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
             HERDR_WORKSPACE_ID=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+            HERDR_WORKSPACE_LABEL=$HERDR_PROJECTION_LABEL
+            HERDR_TAB_LABEL=$W
+            HERDR_PANE_LABEL=$W
             HERDR_SEEDED_DEFAULT_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
             HERDR_TAB_ID=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
             HERDR_PANE_ID=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
@@ -1073,7 +1084,15 @@ case "$BACKEND" in
       fi
     fi
     if [ "$HERDR_PROJECTED" -ne 1 ]; then
-      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure "$PROJ_ABS") || exit 1
+      HERDR_SES=$(fm_backend_herdr_session)
+      fm_backend_herdr_version_check || exit 1
+      fm_backend_herdr_server_ensure "$HERDR_SES" || exit 1
+      spawn_herdr_presentation_order_lock_acquire "$HERDR_SES" || {
+        echo "error: herdr task creation could not acquire its shared named-session lock" >&2
+        exit 1
+      }
+      HERDR_CONTAINER_RAW=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_container_ensure \
+        "$PROJ_ABS" "$STATE/$ID.meta") || exit 1
       # fm_backend_herdr_container_ensure echoes "<session>:<workspace_id>\t<seeded_default_tab_id>"
       # (the second field empty when this call ADOPTED a pre-existing workspace
       # rather than creating a fresh one). Split on the guaranteed single tab
@@ -1084,10 +1103,13 @@ case "$BACKEND" in
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task \
+        "$CONTAINER" "$ID" "$KIND" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID" \
+        "$STATE/$ID.meta" "$HERDR_PARENT_META_OUTPUT") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
+      spawn_herdr_presentation_order_lock_release
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
@@ -1453,6 +1475,10 @@ META_WINDOW=$T
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
+    echo "display_label=$HERDR_TAB_LABEL"
+    echo "herdr_workspace_label=$HERDR_WORKSPACE_LABEL"
+    echo "herdr_tab_label=$HERDR_TAB_LABEL"
+    echo "herdr_pane_label=$HERDR_PANE_LABEL"
   fi
   if [ "$BACKEND" = zellij ]; then
     echo "zellij_session=$ZELLIJ_SES"
