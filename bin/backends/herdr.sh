@@ -139,13 +139,17 @@ fm_backend_herdr_role_for_kind() {  # <task-kind>
 
 fm_backend_herdr_format_label() {  # <concise-subject> <role>
   local subject=${1:-} role=${2:-}
-  case "$role" in primary|worker|scout|'second mate') ;; *) return 1 ;; esac
-  if [ "$subject" = firstmate ]; then
-    [ "$role" = primary ] || {
-      echo "error: herdr readable-label subject 'firstmate' is reserved for the primary role" >&2
+  case "$role" in primary|project|worker|scout|'second mate') ;; *) return 1 ;; esac
+  if [ "$role" = primary ]; then
+    [ "$subject" = firstmate ] || {
+      echo "error: the herdr primary role is reserved for the native firstmate tuple" >&2
       return 1
     }
-  else
+  elif [ "$subject" = firstmate ] && [ "$role" != project ]; then
+    echo "error: herdr readable-label subject 'firstmate' is reserved for native primary or project roles" >&2
+    return 1
+  fi
+  if [ "$subject" != firstmate ]; then
     case "$subject" in
       ''|fm-*|2ndmate-*|primary|worker|scout|secondmate|'second mate'|task|project|workspace|tab|pane|unknown|default|untitled|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*|*[!A-Za-z0-9])
         echo "error: invalid herdr readable-label subject: $subject" >&2
@@ -180,7 +184,21 @@ fm_backend_herdr_workspace_label() {  # <spawned-project-or-home>
     return
   fi
   subject=${project%/}; subject=${subject##*/}
-  fm_backend_herdr_format_label "$subject" primary
+  fm_backend_herdr_format_label "$subject" project
+}
+
+# Before project workspaces gained their own role, a primary-home task
+# container used <project> · primary. Only an exact metadata or journal tuple
+# may corroborate this prior spelling; native firstmate · primary remains a
+# separate process-owned tuple and is never published as task ownership.
+fm_backend_herdr_workspace_prior_primary_label() {  # <spawned-project>
+  local project=${1:-} subject project_label
+  [ ! -e "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] \
+    && [ ! -L "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] || return 1
+  subject=${project%/}; subject=${subject##*/}
+  project_label=$(fm_backend_herdr_format_label "$subject" project) || return 1
+  printf '%s%sprimary' "${project_label%"${FM_BACKEND_HERDR_LABEL_SEPARATOR}"project}" \
+    "$FM_BACKEND_HERDR_LABEL_SEPARATOR"
 }
 
 fm_backend_herdr_task_label() {  # <task-id> <task-kind>
@@ -537,11 +555,10 @@ fm_backend_herdr_projection_workspace_label() {  # <task-id> <projection-id>
 }
 
 # fm_backend_herdr_presentation_session_lock_path: one machine-private lock
-# path per live named Herdr session/socket, shared across every Firstmate home
-# that uses that session.
-# The path is never under any one home's state/ and secondmates never write the
-# primary home. Returns non-zero when the named session's socket cannot be
-# resolved unambiguously.
+# path per globally unique physical running Herdr socket, shared across every
+# Firstmate home and running name that could mutate that socket. The inventory
+# canonicalizes every running socket, refuses aliases or malformed rows, and
+# ignores stopped aliases. The path is never under any home's state/.
 fm_backend_herdr_presentation_lock_namespace() {
   printf '%s' '/tmp/firstmate-herdr-presentation'
 }
@@ -571,36 +588,61 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
-# Resolve the one verified running named-session socket path as an absolute
-# string. Requires JSON string type and non-empty length (jq -r is never used:
-# it would turn JSON null into the literal string "null"). Canonicalizes the
-# parent directory when that directory exists so symlink parents such as /tmp
-# -> /private/tmp cannot yield two lock identities for the same socket.
+# Canonicalize one absolute running socket to its physical identity. The
+# socket itself must resolve, so both a symlinked parent and a symlinked final
+# path converge to the same mutation-lock key.
+fm_backend_herdr_canonical_socket_path() {  # <absolute-socket-path>
+  local socket=${1:-} canonical
+  case "$socket" in /*) ;; *) return 1 ;; esac
+  command -v realpath >/dev/null 2>&1 || return 1
+  canonical=$(realpath "$socket" 2>/dev/null) || return 1
+  case "$canonical" in /*) ;; *) return 1 ;; esac
+  [ -n "$canonical" ] && [ -e "$canonical" ] || return 1
+  printf '%s' "$canonical"
+}
+
+# Resolve a requested running name only after canonicalizing every running
+# inventory socket. Exactly one running row may name the requested session and
+# exactly one running name may resolve to that physical socket. Stopped aliases
+# are irrelevant; malformed running inventory grants no mutation lock.
 fm_backend_herdr_presentation_session_socket_path() {  # <session>
-  local session=$1 sessions socket sock_dir sock_base
+  local session=$1 sessions rows row name socket canonical requested_count=0 socket_count=0 target=
   [ -n "$session" ] || return 1
   sessions=$(fm_backend_herdr_cli "$session" session list --json 2>/dev/null) || return 1
-  socket=$(printf '%s' "$sessions" | jq -er --arg want "$session" '
-    [.sessions[]?
-      | select(.name == $want and .running == true)
-      | select((.socket_path | type) == "string")
-      | select((.socket_path | length) > 0)
-      | .socket_path]
-    | if length == 1 then .[0] else empty end
+  rows=$(printf '%s' "$sessions" | jq -er '
+    select((.sessions | type) == "array")
+    | [.sessions[]? | select(.running == true)] as $running
+    | select(all($running[]?;
+        (.name | type) == "string" and (.name | length) > 0
+        and ((.name | test("[[:space:][:cntrl:]]")) | not)
+        and (.socket_path | type) == "string" and (.socket_path | length) > 0))
+    | select(([$running[].name] | length) == ([$running[].name] | unique | length))
+    | $running[] | [.name,.socket_path] | @tsv
   ' 2>/dev/null) || return 1
-  [ -n "$socket" ] || return 1
-  case "$socket" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  sock_dir=$(dirname "$socket")
-  sock_base=$(basename "$socket")
-  [ -n "$sock_dir" ] && [ -n "$sock_base" ] || return 1
-  if [ -d "$sock_dir" ]; then
-    sock_dir=$(cd "$sock_dir" 2>/dev/null && pwd -P) || return 1
-    socket="$sock_dir/$sock_base"
-  fi
-  printf '%s' "$socket"
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    name=${row%%$'\t'*}
+    socket=${row#*$'\t'}
+    [ -n "$name" ] && [ -n "$socket" ] && [ "$socket" != "$row" ] || return 1
+    canonical=$(fm_backend_herdr_canonical_socket_path "$socket") || return 1
+    if [ "$name" = "$session" ]; then
+      requested_count=$((requested_count + 1))
+      target=$canonical
+    fi
+  done <<EOF
+$rows
+EOF
+  [ "$requested_count" -eq 1 ] && [ -n "$target" ] || return 1
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    socket=${row#*$'\t'}
+    canonical=$(fm_backend_herdr_canonical_socket_path "$socket") || return 1
+    [ "$canonical" != "$target" ] || socket_count=$((socket_count + 1))
+  done <<EOF
+$rows
+EOF
+  [ "$socket_count" -eq 1 ] || return 1
+  printf '%s' "$target"
 }
 
 fm_backend_herdr_presentation_session_lock_path() {  # <session>
@@ -608,9 +650,9 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   [ -n "$session" ] || return 1
   socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s' "$socket" | shasum -a 256 2>/dev/null | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s\0%s' "$session" "$socket" | sha256sum 2>/dev/null | awk '{print $1}')
+    hash=$(printf '%s' "$socket" | sha256sum 2>/dev/null | awk '{print $1}')
   else
     return 1
   fi
@@ -777,7 +819,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       and (
         (.label == "firstmate")
         or (.label | test("^2ndmate-[^/]+$"))
-        or (.label | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,47} · (primary|second mate)$"))
+        or (.label | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,47} · (project|primary|second mate)$"))
       );
     def is_new_child:
       (.label | type) == "string"
@@ -787,7 +829,7 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
       and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"));
     def legacy_owner_for($owner):
       if $owner == "firstmate" or ($owner | test("^2ndmate-[^/]+$")) then $owner
-      elif ($owner | endswith(" · primary")) then "firstmate"
+      elif ($owner | endswith(" · project")) or ($owner | endswith(" · primary")) then "firstmate"
       elif ($owner | endswith(" · second mate")) then
         "2ndmate-" + ($owner | sub(" · second mate$"; ""))
       else null
@@ -957,6 +999,12 @@ fm_backend_herdr_meta_field_exact() {  # <metadata-file> <field>
   grep "^${field}=" "$meta" 2>/dev/null | cut -d= -f2-
 }
 
+# Validate one regular non-symlink metadata candidate before any Herdr atomic
+# publication or exact-tuple use. An exact backend=herdr claim must be unique;
+# routing ids must each be one non-whitespace identity; optional display fields
+# must be unique, non-empty, control-free, and bounded; the session alias has
+# one fixed value. Records with no Herdr claim remain outside this validator's
+# backend-specific schema.
 fm_backend_herdr_metadata_validate_record() {  # <metadata-file>
   local meta=$1 field count value backend_count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1009,7 +1057,11 @@ fm_backend_herdr_metadata_validate_home() {  # <state-directory>
 }
 
 # Persist the exact parent tuple inside a marked home so its first child can
-# corroborate the stable workspace without adopting it by label.
+# corroborate the stable workspace without adopting it by label. The writer
+# creates a mode-0600 same-directory private file, validates the complete Herdr
+# record and fixed session alias, then renames it over the exact child-home path.
+# Caller-owned recovery validation remains separate and cannot turn this record
+# into generic task or projection authority.
 fm_backend_herdr_parent_metadata_write() {  # <path> <task-id> <home> <session> <workspace> <tab> <pane> <workspace-label> <task-label>
   local path=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7 workspace_label=$8 task_label=$9 tmp
   [ "$path" = "$FM_HOME/state/.herdr-parent.meta" ] || return 1
@@ -1027,6 +1079,48 @@ fm_backend_herdr_parent_metadata_write() {  # <path> <task-id> <home> <session> 
   fi
   fm_backend_herdr_metadata_validate_record "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+}
+
+# Validate the one child-home parent record that may recover a second-mate
+# publication crash. The path, marker, kind, task, canonical home/project/
+# worktree identities, session tuple, fixed alias, and adapter-derived labels
+# must all match. This record never becomes generic task metadata and grants no
+# projected-fallback authority.
+fm_backend_herdr_parent_metadata_validate_recovery() {  # <path> <task-id> <home> <project> <worktree> <session>
+  local path=$1 id=$2 home=$3 project=$4 worktree=$5 session=$6 field lines mode
+  local expected_home actual subject expected_workspace expected_task
+  [ "$path" = "$FM_HOME/state/.herdr-parent.meta" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$path") || return 1
+  [ "$mode" = 600 ] || return 1
+  lines=$(wc -l < "$path" 2>/dev/null | tr -d '[:space:]')
+  [ "$lines" = 15 ] || return 1
+  fm_backend_herdr_metadata_validate_record "$path" || return 1
+  [ "$(grep -c '^backend=herdr$' "$path" 2>/dev/null || true)" = 1 ] \
+    && [ "$(grep -c '^backend=' "$path" 2>/dev/null || true)" = 1 ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$path" kind)" = secondmate ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$path" task_id)" = "$id" ] || return 1
+  subject=$(fm_backend_herdr_secondmate_subject) || return 1
+  [ "$subject" = "$id" ] || return 1
+  expected_home=$(fm_backend_herdr_project_identity "$home") || return 1
+  for field in project home worktree; do
+    actual=$(fm_backend_herdr_meta_field_exact "$path" "$field") || return 1
+    actual=$(fm_backend_herdr_project_identity "$actual") || return 1
+    [ "$actual" = "$expected_home" ] || return 1
+  done
+  actual=$(fm_backend_herdr_project_identity "$project") || return 1
+  [ "$actual" = "$expected_home" ] || return 1
+  actual=$(fm_backend_herdr_project_identity "$worktree") || return 1
+  [ "$actual" = "$expected_home" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$path" herdr_session)" = "$session" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$path" herdr_session_display_label)" \
+    = "$FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL" ] || return 1
+  expected_workspace=$(fm_backend_herdr_workspace_label "$project") || return 1
+  expected_task=$(fm_backend_herdr_task_label "$id" secondmate) || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$path" herdr_workspace_label)" = "$expected_workspace" ] || return 1
+  for field in display_label herdr_tab_label herdr_pane_label; do
+    [ "$(fm_backend_herdr_meta_field_exact "$path" "$field")" = "$expected_task" ] || return 1
+  done
 }
 
 fm_backend_herdr_metadata_load_tuple() {  # <metadata-file>
@@ -1155,13 +1249,15 @@ fm_backend_herdr_workspace_legacy_label() {
   fi
 }
 
-# Resolve one metadata-owned project workspace, or the stable marked-home
-# workspace. An optional parent metadata record lets a primary second-mate
-# spawn corroborate the marked home without label adoption.
-fm_backend_herdr_workspace_find() {  # <session> <spawned-project-or-home> [authoritative-metadata]
-  local session=$1 project=$2 authoritative=${3:-} state="$FM_HOME/state" parent_meta
+# Resolve one metadata-owned project workspace or stable marked home without
+# label adoption. Projected fallback may exclude one child record; v2/v3 may
+# select only one exact journal parent id and its derived prior label. Those
+# inputs choose a flat parent but never become task ownership evidence.
+fm_backend_herdr_workspace_find() {  # <session> <project-or-home> [task-meta] [excluded-meta] [exact-parent-id] [exact-parent-prior-label]
+  local session=$1 project=$2 task_meta=${3:-} excluded=${4:-}
+  local exact_parent=${5:-} exact_parent_prior=${6:-} state="$FM_HOME/state" parent_meta
   local meta backend kind record_project record_identity record_home home_identity id subject
-  local desired legacy readable task_legacy target_identity list wsid current recorded
+  local desired prior="" legacy readable task_legacy target_identity list wsid current recorded
   local exact_wsid="" exact_label="" foreign_wsids="" paths="" marked=0 count
   FM_BACKEND_HERDR_WS_FOUND_ID=""
   FM_BACKEND_HERDR_WS_CURRENT_LABEL=""
@@ -1172,12 +1268,48 @@ fm_backend_herdr_workspace_find() {  # <session> <spawned-project-or-home> [auth
   if subject=$(fm_backend_herdr_secondmate_subject 2>/dev/null); then
     marked=1
     target_identity=$(fm_backend_herdr_project_identity "$FM_HOME") || return 1
+  else
+    prior=$(fm_backend_herdr_workspace_prior_primary_label "$project") || return 1
   fi
   list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$list" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$list" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[]?;
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.label | type) == "string" and (.label | length) > 0)
+    and ([.result.workspaces[].workspace_id] | length)
+        == ([.result.workspaces[].workspace_id] | unique | length)
+  ' >/dev/null 2>&1 || return 1
+
+  # A v2/v3 projected fallback may select only its journal-bound flat parent.
+  # The journal id grants no task ownership and its prior label is accepted only
+  # when it equals this project's derived pre-migration label.
+  if [ -n "$exact_parent" ]; then
+    case "$exact_parent" in *[[:space:][:cntrl:]]*) return 1 ;; esac
+    if [ "$marked" -eq 1 ]; then
+      [ -z "$exact_parent_prior" ] || return 1
+    else
+      [ -z "$exact_parent_prior" ] || [ "$exact_parent_prior" = "$prior" ] || return 1
+    fi
+    count=$(printf '%s' "$list" | jq -r --arg workspace "$exact_parent" \
+      '[.result.workspaces[]? | select(.workspace_id == $workspace)] | length' 2>/dev/null) || return 1
+    [ "$count" = 1 ] || return 1
+    current=$(printf '%s' "$list" | jq -er --arg workspace "$exact_parent" \
+      '.result.workspaces[] | select(.workspace_id == $workspace) | .label' 2>/dev/null) || return 1
+    [ "$current" = "$desired" ] \
+      || { [ -n "$exact_parent_prior" ] && [ "$current" = "$exact_parent_prior" ]; } || return 1
+    count=$(printf '%s' "$list" | jq -r --arg workspace "$exact_parent" --arg desired "$desired" \
+      '[.result.workspaces[]? | select(.workspace_id != $workspace and .label == $desired)] | length' 2>/dev/null) || return 1
+    [ "$count" = 0 ] || return 1
+    FM_BACKEND_HERDR_WS_FOUND_ID=$exact_parent
+    FM_BACKEND_HERDR_WS_CURRENT_LABEL=$current
+    printf '%s' "$exact_parent"
+    return 0
+  fi
 
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    [ -z "$excluded" ] || [ "$meta" != "$excluded" ] || continue
     backend=$(fm_backend_herdr_meta_field_exact "$meta" backend 2>/dev/null) || continue
     [ "$backend" = herdr ] || continue
     paths="${paths}${meta}"$'\n'
@@ -1186,12 +1318,14 @@ fm_backend_herdr_workspace_find() {  # <session> <spawned-project-or-home> [auth
   if [ -e "$parent_meta" ] || [ -L "$parent_meta" ]; then
     fm_backend_herdr_metadata_validate_record "$parent_meta" || return 1
     [ "$(fm_backend_herdr_meta_field_exact "$parent_meta" backend 2>/dev/null)" = herdr ] || return 1
-    paths="${paths}${parent_meta}"$'\n'
+    [ -z "$excluded" ] || [ "$parent_meta" != "$excluded" ] \
+      || parent_meta=""
+    [ -z "$parent_meta" ] || paths="${paths}${parent_meta}"$'\n'
   fi
-  if [ -n "$authoritative" ] && { [ -e "$authoritative" ] || [ -L "$authoritative" ]; }; then
-    fm_backend_herdr_metadata_validate_record "$authoritative" || return 1
-    [ "$(fm_backend_herdr_meta_field_exact "$authoritative" backend 2>/dev/null)" = herdr ] || return 1
-    printf '%s' "$paths" | grep -Fqx "$authoritative" || paths="${paths}${authoritative}"$'\n'
+  if [ -n "$task_meta" ] && { [ -e "$task_meta" ] || [ -L "$task_meta" ]; }; then
+    fm_backend_herdr_metadata_validate_record "$task_meta" || return 1
+    [ "$(fm_backend_herdr_meta_field_exact "$task_meta" backend 2>/dev/null)" = herdr ] || return 1
+    printf '%s' "$paths" | grep -Fqx "$task_meta" || paths="${paths}${task_meta}"$'\n'
   fi
 
   while IFS= read -r meta; do
@@ -1234,8 +1368,13 @@ fm_backend_herdr_workspace_find() {  # <session> <spawned-project-or-home> [auth
     recorded=$(fm_backend_herdr_meta_field_exact "$meta" herdr_workspace_label 2>/dev/null || true)
     if [ -n "$recorded" ]; then
       [ "$current" = "$recorded" ] || return 1
+      [ "$recorded" = "$desired" ] || [ "$recorded" = "$legacy" ] \
+        || { [ -n "$prior" ] && [ "$recorded" = "$prior" ]; } \
+        || printf '%s\n' "$recorded" | grep -Eq '^└ .+ · p:[A-Za-z0-9_-]{22}$' \
+        || return 1
     else
-      [ "$current" = "$desired" ] || [ "$current" = "$legacy" ] || return 1
+      [ "$current" = "$desired" ] || [ "$current" = "$legacy" ] \
+        || { [ -n "$prior" ] && [ "$current" = "$prior" ]; } || return 1
     fi
     case "$meta" in
       */.herdr-parent.meta) id=$(fm_backend_herdr_meta_field_exact "$meta" task_id 2>/dev/null) || return 1 ;;
@@ -1278,8 +1417,11 @@ EOF
       return 1
     fi
     count=$(printf '%s' "$list" | jq -r --arg workspace "$exact_wsid" --arg desired "$desired" \
-      --arg legacy "$legacy" --arg current "$exact_label" \
-      '[.result.workspaces[]? | select(.workspace_id != $workspace and (.label == $desired or .label == $legacy or .label == $current))] | length' 2>/dev/null)
+      --arg legacy "$legacy" --arg current "$exact_label" --arg prior "$prior" '
+      [.result.workspaces[]?
+        | select(.workspace_id != $workspace)
+        | select(.label == $desired or .label == $legacy or (.label == $current and $current != $prior))]
+      | length' 2>/dev/null) || return 1
     [ "$count" = 0 ] || {
       echo "error: duplicate herdr workspace candidate in session $session" >&2
       return 1
@@ -1291,12 +1433,12 @@ EOF
   fi
 
   count=$(printf '%s' "$list" | jq -r --arg desired "$desired" --arg legacy "$legacy" \
-    '[.result.workspaces[]? | select(.label == $desired or .label == $legacy)] | length' 2>/dev/null)
+    '[.result.workspaces[]? | select(.label == $desired or .label == $legacy)] | length' 2>/dev/null) || return 1
   [ "$count" = 0 ] || {
     if [ "$marked" -eq 1 ]; then
       echo "error: unowned marked second-mate herdr workspace label collision in session $session" >&2
     else
-      echo "error: uncorroborated primary herdr workspace candidate in session $session" >&2
+      echo "error: uncorroborated project herdr workspace candidate in session $session" >&2
     fi
     return 1
   }
@@ -1381,12 +1523,15 @@ fm_backend_herdr_new_pane_rollback() {  # <session> <response-derived-pane-id>
 # marked workspace for a second-mate home. Existing primary workspaces require
 # exact local metadata identity. Only a response-derived pane can be removed
 # after a partial new-object failure.
-fm_backend_herdr_workspace_ensure() {  # <session> <spawned-project-or-home> [authoritative-metadata]
-  local session=$1 project=$2 authoritative=${3:-} wsid out readable response_label seeded_tab seeded_pane
+fm_backend_herdr_workspace_ensure() {  # <session> <project-or-home> [task-meta] [excluded-meta] [exact-parent-id] [exact-parent-prior-label]
+  local session=$1 project=$2 task_meta=${3:-} excluded=${4:-}
+  local exact_parent=${5:-} exact_parent_prior=${6:-}
+  local wsid out readable response_label seeded_tab seeded_pane
   FM_BACKEND_HERDR_WS_ID=""
   FM_BACKEND_HERDR_WS_SEEDED_TAB_ID=""
   readable=$(fm_backend_herdr_workspace_label "$project") || return 1
-  fm_backend_herdr_workspace_find "$session" "$project" "$authoritative" >/dev/null || return 1
+  fm_backend_herdr_workspace_find "$session" "$project" "$task_meta" "$excluded" \
+    "$exact_parent" "$exact_parent_prior" >/dev/null || return 1
   wsid=$FM_BACKEND_HERDR_WS_FOUND_ID
   if [ -n "$wsid" ]; then
     if [ "$FM_BACKEND_HERDR_WS_CURRENT_LABEL" != "$readable" ]; then
@@ -1417,13 +1562,15 @@ fm_backend_herdr_workspace_ensure() {  # <session> <spawned-project-or-home> [au
 
 # Full spawn-time container ensure; returns container and response-derived
 # seeded tab id so only this creation can prune that tab.
-fm_backend_herdr_container_ensure() {  # <spawned-project-or-home> [authoritative-metadata]
-  local project=${1:-} authoritative=${2:-} session label
+fm_backend_herdr_container_ensure() {  # <project-or-home> [task-meta] [excluded-meta] [exact-parent-id] [exact-parent-prior-label]
+  local project=${1:-} task_meta=${2:-} excluded=${3:-}
+  local exact_parent=${4:-} exact_parent_prior=${5:-} session label
   label=$(fm_backend_herdr_workspace_label "$project") || return 1
   fm_backend_herdr_version_check || return 1
   session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
-  fm_backend_herdr_workspace_ensure "$session" "$project" "$authoritative" >/dev/null || {
+  fm_backend_herdr_workspace_ensure "$session" "$project" "$task_meta" "$excluded" \
+    "$exact_parent" "$exact_parent_prior" >/dev/null || {
     echo "error: failed to ensure herdr workspace '$label' in session '$session'" >&2
     return 1
   }
@@ -1557,12 +1704,14 @@ fm_backend_herdr_pane_rename_exact() {  # <session> <workspace-id> <tab-id> <pan
 fm_backend_herdr_husk_snapshot_loaded_exact() {  # <session> <workspace> <tab> <pane> <readable-label> <legacy-label> <recorded-tab-label> <recorded-pane-label> <project-cwd> <worktree-cwd>
   local session=$1 wsid=$2 tab_id=$3 pane_id=$4 readable=$5 legacy=$6
   local recorded_tab=$7 recorded_pane=$8 project_cwd=$9 worktree_cwd=${10}
-  local agent_info workspace_label readable_workspace legacy_workspace tab_label pane_label pane_cwd
+  local agent_info workspace_label readable_workspace prior_workspace="" legacy_workspace tab_label pane_label pane_cwd
   [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] || return 1
   workspace_label=$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL
   readable_workspace=$(fm_backend_herdr_workspace_label "$project_cwd") || return 1
+  prior_workspace=$(fm_backend_herdr_workspace_prior_primary_label "$project_cwd" 2>/dev/null || true)
   legacy_workspace=$(fm_backend_herdr_workspace_legacy_label) || return 1
-  [ "$workspace_label" = "$readable_workspace" ] || [ "$workspace_label" = "$legacy_workspace" ] || return 1
+  [ "$workspace_label" = "$readable_workspace" ] || [ "$workspace_label" = "$legacy_workspace" ] \
+    || { [ -n "$prior_workspace" ] && [ "$workspace_label" = "$prior_workspace" ]; } || return 1
   tab_label=$FM_BACKEND_HERDR_LIVE_TAB_LABEL
   pane_label=$FM_BACKEND_HERDR_LIVE_PANE_LABEL
   pane_cwd=$FM_BACKEND_HERDR_LIVE_PANE_CWD
@@ -1596,14 +1745,17 @@ fm_backend_herdr_husk_snapshot_exact() {  # <session> <workspace> <tab> <pane> <
 # Create one readable task. An exact no-agent husk is replaced only after two
 # matching snapshots. Positively absent metadata objects are recreated without
 # closing or renaming any old object; every ambiguous partial match refuses.
-fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <seeded-tab-id> [metadata-file] [marked-parent-metadata-output]
+fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <seeded-tab-id> [task-metadata] [parent-output] [secondmate-parent-recovery]
   local container=$1 id=$2 kind=$3 cwd=$4 seeded_tab_id=${5:-} meta=${6:-} parent_meta=${7:-}
+  local parent_recovery=${8:-}
   local session wsid readable legacy list out tab_id pane_id exact_tab="" exact_pane=""
   local matching_count remaining_count collision_exempt="" replace_husk=0 tuple_state=""
   local missing_workspace_label="" missing_tab_label=""
   local meta_workspace meta_project meta_project_identity target_project_identity meta_worktree owner_wsid
   local recorded_workspace_label recorded_tab_label recorded_pane_label current_workspace_label
-  local readable_workspace legacy_workspace parent_workspace_label snapshot_before snapshot_after
+  local readable_workspace prior_workspace="" legacy_workspace parent_workspace_label snapshot_before snapshot_after
+  [ -z "$parent_recovery" ] || [ -z "$meta" ] \
+    || { echo "error: task metadata and second-mate parent recovery evidence must stay separate" >&2; return 1; }
   session=${container%%:*}
   wsid=${container#*:}
   readable=$(fm_backend_herdr_task_label "$id" "$kind") || return 1
@@ -1660,12 +1812,19 @@ fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <see
         [ "$meta_workspace" = "$wsid" ] || return 1
         current_workspace_label=$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL
         readable_workspace=$(fm_backend_herdr_workspace_label "$meta_project") || return 1
+        prior_workspace=$(fm_backend_herdr_workspace_prior_primary_label "$meta_project" 2>/dev/null || true)
         legacy_workspace=$(fm_backend_herdr_workspace_legacy_label) || return 1
         if [ -n "$recorded_workspace_label" ]; then
           [ "$current_workspace_label" = "$recorded_workspace_label" ] || return 1
+          [ "$recorded_workspace_label" = "$readable_workspace" ] \
+            || [ "$recorded_workspace_label" = "$legacy_workspace" ] \
+            || { [ -n "$prior_workspace" ] && [ "$recorded_workspace_label" = "$prior_workspace" ]; } \
+            || return 1
         else
           [ "$current_workspace_label" = "$readable_workspace" ] \
-            || [ "$current_workspace_label" = "$legacy_workspace" ] || return 1
+            || [ "$current_workspace_label" = "$legacy_workspace" ] \
+            || { [ -n "$prior_workspace" ] && [ "$current_workspace_label" = "$prior_workspace" ]; } \
+            || return 1
         fi
         if [ "$tuple_state" = missing-pane ]; then
           if [ -n "$recorded_tab_label" ]; then
@@ -1687,6 +1846,40 @@ fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <see
         ;;
       *) return 1 ;;
     esac
+  elif [ -n "$parent_recovery" ]; then
+    [ "$kind" = secondmate ] || return 1
+    fm_backend_herdr_parent_metadata_validate_recovery \
+      "$parent_recovery" "$id" "$cwd" "$cwd" "$cwd" "$session" || {
+      echo "error: second-mate parent recovery record for $id is not exact" >&2
+      return 1
+    }
+    fm_backend_herdr_metadata_load_tuple "$parent_recovery" || return 1
+    meta_workspace=$FM_BACKEND_HERDR_META_WORKSPACE
+    exact_tab=$FM_BACKEND_HERDR_META_TAB
+    exact_pane=$FM_BACKEND_HERDR_META_PANE
+    [ "$meta_workspace" = "$wsid" ] || return 1
+    meta_project=$(fm_backend_herdr_meta_field_exact "$parent_recovery" project) || return 1
+    meta_worktree=$(fm_backend_herdr_meta_field_exact "$parent_recovery" worktree) || return 1
+    recorded_workspace_label=$(fm_backend_herdr_meta_field_exact \
+      "$parent_recovery" herdr_workspace_label) || return 1
+    recorded_tab_label=$(fm_backend_herdr_meta_field_exact \
+      "$parent_recovery" herdr_tab_label) || return 1
+    recorded_pane_label=$(fm_backend_herdr_meta_field_exact \
+      "$parent_recovery" herdr_pane_label) || return 1
+    fm_backend_herdr_live_tuple_state "$session" "$meta_workspace" \
+      "$exact_tab" "$exact_pane" 1 || return 1
+    [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] || {
+      echo "error: second-mate parent recovery requires its exact existing workspace, tab, and pane" >&2
+      return 1
+    }
+    snapshot_before=$(fm_backend_herdr_husk_snapshot_loaded_exact \
+      "$session" "$wsid" "$exact_tab" "$exact_pane" "$readable" "$legacy" \
+      "$recorded_tab_label" "$recorded_pane_label" "$meta_project" "$meta_worktree") || {
+      echo "error: second-mate parent recovery endpoint is not one exact no-agent husk" >&2
+      return 1
+    }
+    collision_exempt=$exact_tab
+    replace_husk=1
   fi
 
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
@@ -1957,7 +2150,7 @@ fm_backend_herdr_projection_live_binding_matches() {  # <session> <token> <works
         and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
       def legacy_owner_for($owner):
         if $owner == "firstmate" or ($owner | test("^2ndmate-[^/]+$")) then $owner
-        elif ($owner | endswith(" · primary")) then "firstmate"
+        elif ($owner | endswith(" · project")) or ($owner | endswith(" · primary")) then "firstmate"
         elif ($owner | endswith(" · second mate")) then
           "2ndmate-" + ($owner | sub(" · second mate$"; ""))
         else null
@@ -2183,6 +2376,8 @@ fm_backend_herdr_projection_reclaim_task() {  # <session> <journal> <task-id> <h
 # dead or agent-free; a live or unknown pane refuses a duplicate launch.
 fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <task-id>
   local session=$1 journal=$2 id=$3 token list wsids count wsid panes pane_ids pane state
+  FM_BACKEND_HERDR_PROJECTION_TOKEN_MATCH_COUNT=0
+  FM_BACKEND_HERDR_PROJECTION_UNIQUE_TOKEN_WORKSPACE_ID=""
   token=$(fm_backend_herdr_projection_journal_token "$journal" "$id") || {
     echo "error: malformed herdr presentation journal for $id; refusing duplicate launch" >&2
     return 1
@@ -2202,6 +2397,12 @@ fm_backend_herdr_projection_recovery_allows_flat() {  # <session> <journal> <tas
   wsids=$(printf '%s' "$list" | jq -r --arg suffix " · p:$token" \
     '.result.workspaces[]? | select((.label | type) == "string" and (.label | endswith($suffix))) | .workspace_id' 2>/dev/null)
   count=$(printf '%s\n' "$wsids" | awk 'NF { n += 1 } END { print n + 0 }')
+  # shellcheck disable=SC2034  # fm-spawn consumes these same-process evidence globals
+  FM_BACKEND_HERDR_PROJECTION_TOKEN_MATCH_COUNT=$count
+  if [ "$count" -eq 1 ]; then
+    # shellcheck disable=SC2034  # fm-spawn consumes this same-process evidence global
+    FM_BACKEND_HERDR_PROJECTION_UNIQUE_TOKEN_WORKSPACE_ID=$wsids
+  fi
   if [ "$count" -eq 0 ]; then
     echo "warning: no exact herdr presentation token match for $id; leaving any stale space untouched and spawning flat" >&2
     return 0
@@ -2366,7 +2567,7 @@ fm_backend_herdr_projection_role_transition_shape_matches() {  # <session> <toke
         and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
       def legacy_owner_for($owner):
         if $owner == "firstmate" or ($owner | test("^2ndmate-[^/]+$")) then $owner
-        elif ($owner | endswith(" · primary")) then "firstmate"
+        elif ($owner | endswith(" · project")) or ($owner | endswith(" · primary")) then "firstmate"
         elif ($owner | endswith(" · second mate")) then
           "2ndmate-" + ($owner | sub(" · second mate$"; ""))
         else null end;
@@ -3383,6 +3584,8 @@ fm_backend_herdr_resolve_bare_selector() {  # <name>
         (.tab_id | type) == "string" and (.tab_id | length) > 0
         and (.workspace_id | type) == "string" and (.workspace_id | length) > 0
         and (.label | type) == "string")
+      and ([.result.tabs[]? | [.workspace_id,.tab_id]] | length)
+          == ([.result.tabs[]? | [.workspace_id,.tab_id]] | unique | length)
     ' >/dev/null 2>&1 || {
       echo "error: herdr tab inventory is malformed in running session '$session'" >&2
       return 1
@@ -3436,7 +3639,7 @@ EOF
 # the child task records stored in that home.
 fm_backend_herdr_list_live() {  # <session>
   local session=$1 state="$FM_HOME/state" parent_meta meta backend kind id project label_home secondmate_home
-  local workspace_label recorded_workspace_label readable legacy workspace_list
+  local workspace_label prior_workspace_label legacy_workspace_label recorded_workspace_label readable legacy workspace_list
   local live_workspace_label live_tab_label live_pane_label tuple seen="" lines=""
   fm_backend_herdr_metadata_validate_home "$state" || return 1
   parent_meta="$state/.herdr-parent.meta"
@@ -3462,15 +3665,25 @@ fm_backend_herdr_list_live() {  # <session>
     fi
     readable=$(FM_HOME="$label_home" fm_backend_herdr_task_label "$id" "$kind") || return 1
     workspace_label=$(FM_HOME="$label_home" fm_backend_herdr_workspace_label "$project") || return 1
+    prior_workspace_label=$(FM_HOME="$label_home" \
+      fm_backend_herdr_workspace_prior_primary_label "$project" 2>/dev/null || true)
+    legacy_workspace_label=$(FM_HOME="$label_home" fm_backend_herdr_workspace_legacy_label) || return 1
     recorded_workspace_label=$(fm_backend_herdr_meta_field_exact \
       "$meta" herdr_workspace_label 2>/dev/null || true)
-    # Exact metadata may bind a disposable projected child workspace. Only
-    # that strict child-label shape replaces the recomputed parent label as the
-    # corroboration target. Flat exact metadata and legacy metadata without
-    # this field keep the prior readable/legacy parent rules below.
-    if printf '%s\n' "$recorded_workspace_label" \
-      | grep -Eq '^└ .+ · p:[A-Za-z0-9_-]{22}$'; then
-      workspace_label=$recorded_workspace_label
+    # Exact metadata may bind the strict projected child shape or the prior
+    # <project> · primary spelling. Neither label can select a route without
+    # this exact metadata tuple.
+    if [ -n "$recorded_workspace_label" ]; then
+      if [ "$recorded_workspace_label" = "$workspace_label" ] \
+         || [ "$recorded_workspace_label" = "$legacy_workspace_label" ] \
+         || { [ -n "$prior_workspace_label" ] \
+           && [ "$recorded_workspace_label" = "$prior_workspace_label" ]; } \
+         || printf '%s\n' "$recorded_workspace_label" \
+           | grep -Eq '^└ .+ · p:[A-Za-z0-9_-]{22}$'; then
+        workspace_label=$recorded_workspace_label
+      else
+        return 1
+      fi
     fi
     legacy="fm-$id"
     tuple="${FM_BACKEND_HERDR_META_WORKSPACE}"$'\t'"${FM_BACKEND_HERDR_META_TAB}"$'\t'"${FM_BACKEND_HERDR_META_PANE}"
@@ -3498,7 +3711,9 @@ fm_backend_herdr_list_live() {  # <session>
       [ "$live_workspace_label" = "$workspace_label" ] || return 1
     else
       [ "$live_workspace_label" = "$workspace_label" ] \
-        || [ "$live_workspace_label" = "$(FM_HOME="$label_home" fm_backend_herdr_workspace_legacy_label)" ] || return 1
+        || [ "$live_workspace_label" = "$legacy_workspace_label" ] \
+        || { [ -n "$prior_workspace_label" ] \
+          && [ "$live_workspace_label" = "$prior_workspace_label" ]; } || return 1
     fi
     if grep -q '^herdr_tab_label=' "$meta"; then
       [ "$live_tab_label" = "$readable" ] || return 1

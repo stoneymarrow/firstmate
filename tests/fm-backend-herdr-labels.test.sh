@@ -63,7 +63,7 @@ test_strict_adapter_owned_labels() {
   local home out subject
   home="$TMP_ROOT/labels"; mkdir -p "$home"
   out=$(FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_label /srv/payments' "$ROOT")
-  [ "$out" = 'payments · primary' ] || fail "primary label mismatch: $out"
+  [ "$out" = 'payments · project' ] || fail "project workspace label mismatch: $out"
   out=$(FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_task_label invoice-check ship' "$ROOT")
   [ "$out" = 'invoice-check · worker' ] || fail "worker label mismatch: $out"
   printf 'research\n' > "$home/.fm-secondmate-home"
@@ -92,15 +92,43 @@ test_malformed_metadata_refuses() {
   pass "Herdr metadata: duplicate exact identity fields refuse"
 }
 
+# The prior project-primary spelling is valid only on one exact metadata tuple.
+# A native same-label tuple does not block exact migration and is never touched.
+test_prior_project_label_requires_exact_metadata() {
+  local dir home meta log fake out calls
+  dir="$TMP_ROOT/prior-project-exact"; home="$dir/home"; mkdir -p "$home/state"
+  meta="$home/state/invoice-check.meta"
+  metadata "$meta" ship /srv/payments old old:t1 old:p1
+  printf '%s\n' \
+    'herdr_workspace_label=payments · primary' \
+    'herdr_tab_label=invoice-check · worker' \
+    'herdr_pane_label=invoice-check · worker' >> "$meta"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"native","label":"payments · primary"},{"workspace_id":"old","label":"payments · primary"}]}}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"old","tab_id":"old:t1","label":"invoice-check · worker"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1"}]}}'
+  response "$dir" 4 '{"result":{"pane":{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1","label":"invoice-check · worker"}}}'
+  response "$dir" 5 '{"result":{"workspace":{"workspace_id":"old","label":"payments · project"}}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_workspace_ensure \
+    fmtest /srv/payments "$meta") || fail "exact prior project metadata could not migrate: $out"
+  [ "$out" = old ] || fail "exact prior project migration returned '$out'"
+  calls=$(cat "$log")
+  assert_contains "$calls" $'workspace\037rename\037old\037payments · project' \
+    "exact prior project workspace was not migrated"
+  assert_not_contains "$calls" $'workspace\037rename\037native' \
+    "prior project migration touched the native same-label tuple"
+  pass "Herdr discovery: prior project label requires exact metadata"
+}
+
 # A primary workspace is adopted only through its complete metadata tuple;
 # a second semantic label candidate makes discovery ambiguous.
 test_exact_workspace_discovery_refuses_semantic_duplicate() {
   local dir home meta log fake out status calls
   dir="$TMP_ROOT/workspace-duplicate"; home="$dir/home"; mkdir -p "$home/state"
   meta="$home/state/invoice-check.meta"; metadata "$meta" ship /srv/payments w1 w1:t1 w1:p1
-  printf 'herdr_workspace_label=payments · primary\n' >> "$meta"
+  printf 'herdr_workspace_label=payments · project\n' >> "$meta"
   log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
-  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · primary"},{"workspace_id":"decoy","label":"payments · primary"}]}}'
+  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · project"},{"workspace_id":"decoy","label":"payments · project"}]}}'
   response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"invoice-check · worker"}]}}'
   response "$dir" 3 '{"result":{"panes":[{"pane_id":"w1:p1","tab_id":"w1:t1"}]}}'
   response "$dir" 4 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1"}}}'
@@ -616,19 +644,41 @@ test_projection_live_binding_refuses_pane_label_change() {
   pass "Herdr projection binding: exact pane get enforces the readable pane label"
 }
 
-# The reserved firstmate subject formats only the native primary role.
-test_firstmate_primary_formatter_boundary() {
-  local out role
+# Native-primary and task-project labels are distinct even when the project is
+# itself named firstmate. The native tuple remains untouched by first task
+# workspace creation.
+test_native_primary_and_firstmate_project_are_distinct() {
+  local dir home log fake out calls role
   out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label firstmate primary' "$ROOT") \
     || fail "firstmate primary formatter refused"
   [ "$out" = 'firstmate · primary' ] || fail "firstmate primary label mismatch: $out"
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label firstmate project' "$ROOT") \
+    || fail "firstmate project formatter refused"
+  [ "$out" = 'firstmate · project' ] || fail "firstmate project label mismatch: $out"
   for role in worker scout 'second mate'; do
     if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label firstmate "$1"' \
       "$ROOT" "$role" >/dev/null 2>&1; then
       fail "firstmate subject was accepted for role '$role'"
     fi
   done
-  pass "Herdr labels: firstmate subject is reserved to the primary role"
+  if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label payments primary' \
+    "$ROOT" >/dev/null 2>&1; then
+    fail "non-native subject was accepted for the primary role"
+  fi
+
+  dir="$TMP_ROOT/native-project-distinct"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"native","label":"firstmate · primary"}]}}'
+  response "$dir" 2 '{"result":{"workspace":{"workspace_id":"project","label":"firstmate · project"},"tab":{"tab_id":"project:t1"},"root_pane":{"pane_id":"project:p1"}}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_workspace_ensure fmtest /srv/firstmate) \
+    || fail "firstmate project workspace creation refused beside native primary"
+  [ "$out" = project ] || fail "firstmate project workspace returned '$out'"
+  calls=$(<"$log")
+  assert_contains "$calls" $'workspace\037create\037--cwd\037/srv/firstmate\037--label\037firstmate · project' \
+    "firstmate task workspace was not created with its project role"
+  assert_not_contains "$calls" $'workspace\037rename\037native' \
+    "firstmate task workspace creation renamed the native primary tuple"
+  pass "Herdr labels: native primary and firstmate project stay distinct"
 }
 
 # Herdr's honest native-session alias is one optional exact display field.
@@ -688,6 +738,25 @@ test_bare_selector_global_uniqueness() {
     || fail "one globally exact bare selector refused"
   [ "$out" = 'alpha:wa:pa' ] || fail "one exact bare selector returned '$out'"
 
+  dir="$TMP_ROOT/bare-duplicate-identity"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"sessions":[{"name":"alpha","running":true}]}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"wa","tab_id":"wa:ta","label":"one"},{"workspace_id":"wa","tab_id":"wa:ta","label":"other"}]}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_resolve_bare_selector one 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "duplicate bare-selector tab identity chose one divergent row"
+  assert_contains "$out" 'tab inventory is malformed' "duplicate tab identity refusal was not clear"
+
+  dir="$TMP_ROOT/bare-reused-cross-session-identity"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"sessions":[{"name":"alpha","running":true},{"name":"bravo","running":true}]}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"one"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1"}]}}'
+  response "$dir" 4 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"other"}]}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_resolve_bare_selector one) \
+    || fail "cross-session reuse of tab ids was treated as one duplicate identity"
+  [ "$out" = 'alpha:w1:p1' ] || fail "cross-session reused ids returned '$out'"
+
   dir="$TMP_ROOT/bare-multipane"; home="$dir/home"; mkdir -p "$home/state"
   log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
   response "$dir" 1 '{"sessions":[{"name":"alpha","running":true}]}'
@@ -699,7 +768,7 @@ test_bare_selector_global_uniqueness() {
   pass "Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse"
 }
 
-test_firstmate_primary_formatter_boundary
+test_native_primary_and_firstmate_project_are_distinct
 test_session_display_alias_metadata
 test_bare_selector_global_uniqueness
 test_projection_journal_versions_and_readable_binding
@@ -707,6 +776,7 @@ test_projection_create_renames_and_verifies_both_labels
 test_projection_live_binding_refuses_pane_label_change
 test_strict_adapter_owned_labels
 test_malformed_metadata_refuses
+test_prior_project_label_requires_exact_metadata
 test_exact_workspace_discovery_refuses_semantic_duplicate
 test_marked_workspace_collision_is_untouched
 test_prefix_free_list_live_uses_only_exact_local_metadata

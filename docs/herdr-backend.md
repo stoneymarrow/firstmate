@@ -33,8 +33,8 @@ Real harness credential tests remain opt-in rather than part of default CI.
 
 ## Watching and task containers
 
-Each Firstmate home gets one durable workspace with one task tab per endpoint.
-A primary project workspace uses `<project> · primary`.
+Each primary-home project gets one durable workspace, while each secondmate home gets one stable home workspace; both use one task tab per endpoint.
+A primary-home project workspace uses `<project> · project`, which stays distinct from the native `firstmate · primary` tuple even for the Firstmate repository itself.
 A secondmate home uses `<secondmate-id> · second mate`, derived from its validated `.fm-secondmate-home` marker.
 Worker, scout, and second-mate tabs and panes use their concise task or home subject plus the exact role.
 The secondmate process and every child it launches resolve the same home label; a secondmate launched by the primary receives a narrowly scoped home override during container creation.
@@ -50,11 +50,9 @@ Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
 
 Locked native session start may rename the already-running primary workspace, tab, and pane to `firstmate · primary` through `bin/fm-herdr-primary-labels.sh`.
-The path is inert outside `HERDR_ENV=1`, in a marked secondmate home, or without the exact Herdr socket, workspace, tab, and pane environment identities.
-Before any rename, it requires the regular home session lock to name this harness ancestor, one running named session to own the exact socket, the shared machine-private socket-keyed session lock, the environment tuple to exist, and the exact pane process row to contain that lock owner with a physical current directory equal to the Firstmate root.
-It accepts only each object's legacy or empty label and the exact target, refuses a competing target label, mutates only the three environment-provided ids, verifies every response and the final tuple, and never closes an object.
-A partial response prints `HERDR_LABELS:` and leaves only the accepted old/new mix for the next locked startup to converge.
-An already-converged success stays silent, and a read-only session start never invokes this owner.
+It acts only on a process-owned exact tuple under the physical-socket session lock, never publishes task ownership for that tuple, and never closes an object.
+A refusal or partial rename prints `HERDR_LABELS:`, an already-converged success stays silent, and a read-only start or marked secondmate home leaves the owner inert.
+The script header owns the exact lock, process, socket, accepted-label, rename, and convergence checks.
 
 Herdr does not enforce workspace, tab, or pane label uniqueness.
 Exact metadata tuples own existing Firstmate task discovery; labels only corroborate that identity and never authorize adoption or mutation.
@@ -62,8 +60,8 @@ A duplicate target semantic label, unreadable inventory, or foreign current labe
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
-Scout-to-ship promotion is the one supported role transition: it keeps a durable exact-ID intent, converges the recorded tab and pane forward from scout to worker, updates a matching presentation journal when present, and atomically replaces metadata.
-Teardown refuses while that intent remains unresolved.
+Herdr scout-to-ship promotion is the one supported role transition: it keeps a durable exact-ID intent, converges the recorded tab and pane forward from scout to worker, updates a matching presentation journal when present, and replaces the Herdr record as one complete file.
+Herdr cleanup refuses while that intent remains unresolved; synthetic and other runtime records ignore the Herdr-only sentinel.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
@@ -109,6 +107,9 @@ The replacement tab and pane are created and verified before the old pane is rec
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
 Version 1 journals, dead or missing panes, duplicate or absent tokens, renamed or detached spaces, cross-home mismatches, inconsistent endpoint bindings, active target tabs, and ambiguous identity or focus fall back flat without mutating the old projection when duplicate-agent risk is positively absent.
+A version 2 or version 3 flat fallback selects only the exact journal-recorded parent workspace id, while a version 1 fallback excludes its unique token-bound child and uses normal exact-metadata parent discovery.
+The prior `<project> · primary` parent spelling can migrate only on the exact journal parent id.
+Projected child metadata never enters flat container discovery or task creation, while metadata from a proved prior flat retry keeps exact-husk recovery.
 A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
@@ -156,25 +157,10 @@ The current structural gate removes label inference from cleanup authority.
 
 ## Endpoint metadata
 
-```text
-backend=herdr
-window=<session>:<pane-id>
-herdr_session=<session>
-herdr_session_display_label=Shared Herdr session
-herdr_workspace_id=<workspace-id>
-herdr_tab_id=<tab-id>
-herdr_pane_id=<pane-id>
-display_label=<subject> · <role>
-herdr_workspace_label=<subject> · <role>
-herdr_tab_label=<subject> · <role>
-herdr_pane_label=<subject> · <role>
-```
-
-A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
-The recorded pane is the operational fast path.
-Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
-The session and object display fields are optional for legacy records, unique and bounded when present, and never routing authority.
-New Herdr task metadata and second-mate parent metadata include the honest session alias and publish through a validated same-directory temporary file plus rename so a reader cannot observe a partial record.
+[`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the complete Herdr task and second-mate parent field schema, legacy optional fields, uniqueness, bounds, and non-routing meaning.
+The recorded pane remains the operational fast path, while workspace and tab ids support exact verification and cleanup.
+Herdr task and parent publication gives readers complete-record-or-none visibility; the exact private-file, validation, rename, and cleanup steps live in the relevant script headers.
+A crash after second-mate parent publication but before primary task publication can recover only the exact one-pane, no-agent husk named by the validated child-home parent record, after which both records must publish one identical tuple before launch.
 
 For Herdr records, session start, fleet JSON, fleet view, crew state, send errors, and interactive peek place the readable label before the machine target.
 Fleet JSON keeps schema `fm-fleet-snapshot.v1` and preserves `endpoint.target` while adding Herdr-only `display_label` and `session_display_label` keys before it.

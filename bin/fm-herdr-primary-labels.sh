@@ -4,9 +4,11 @@
 #
 # This owner runs only from the locked path of fm-session-start.sh. It is inert
 # outside a native Herdr pane, in a marked second-mate home, or when any exact
-# Herdr socket/workspace/tab/pane environment identity is absent. It never
-# creates or closes an object, never mutates by label, and never treats a label
-# as routing authority.
+# Herdr socket/workspace/tab/pane environment identity is absent. It requires
+# one globally unique physical running socket, then takes that socket's shared
+# mutation lock before process and tuple checks. It never publishes a native-
+# primary ownership record, creates or closes an object, mutates by label, or
+# treats a label as routing authority.
 #
 # Usage: fm-herdr-primary-labels.sh
 # Success, including an already-converged no-op, is silent. A refusal or partial

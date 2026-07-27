@@ -139,6 +139,7 @@ setup_flat() {  # <case-name> [task-label]
   local name=$1 task_label=${2:-'invoice-check · scout'} dir home fake
   dir="$TMP_ROOT/$name"; home="$dir/home"
   mkdir -p "$home/state" "$home/worktree" "$dir/herdr"
+  : > "$dir/herdr/fmtest.sock"
   printf 'w1\tpayments · primary\n' > "$dir/herdr/workspaces.tsv"
   printf 'w1:t1\tw1\t%s\n' "$task_label" > "$dir/herdr/tabs.tsv"
   printf 'w1:p1\tw1\tw1:t1\t%s\t/srv/payments\n' "$task_label" > "$dir/herdr/panes.tsv"
@@ -154,6 +155,7 @@ setup_projected() {  # <case-name> <task-label>
   child="└ invoice-check · p:$token"
   dir="$TMP_ROOT/$name"; home="$dir/home"
   mkdir -p "$home/state" "$home/worktree" "$dir/herdr"
+  : > "$dir/herdr/fmtest.sock"
   printf 'w1\tpayments · primary\nw2\t%s\n' "$child" > "$dir/herdr/workspaces.tsv"
   printf 'w2:t2\tw2\t%s\n' "$task_label" > "$dir/herdr/tabs.tsv"
   printf 'w2:p2\tw2\tw2:t2\t%s\t/srv/payments\n' "$task_label" > "$dir/herdr/panes.tsv"
@@ -454,7 +456,7 @@ EOF
 }
 
 test_teardown_refuses_unresolved_intent() {
-  local dir home fake out status
+  local dir home fake out status non_herdr
   IFS=$'\t' read -r dir home fake <<EOF
 $(setup_flat teardown-intent)
 EOF
@@ -467,20 +469,44 @@ EOF
   [ "$status" -ne 0 ] || fail "teardown accepted an unresolved role-transition intent"
   assert_contains "$out" 'unresolved Herdr role transition' "teardown refusal did not explain the role transition"
   [ -f "$home/state/invoice-check.meta" ] || fail "teardown removed metadata despite unresolved intent"
-  pass "Herdr teardown: unresolved exact-ID role-transition intent refuses cleanup"
+
+  non_herdr="$TMP_ROOT/teardown-non-herdr"; mkdir -p "$non_herdr/state" "$non_herdr/data" "$non_herdr/config"
+  printf '%s\n' 'window=fixture-target' 'worktree=/missing/worktree' 'project=/missing/project' \
+    'kind=ship' 'backend=fixture' > "$non_herdr/state/plain.meta"
+  printf 'unresolved\n' > "$non_herdr/state/plain.herdr-role-transition"
+  out=$(FM_HOME="$non_herdr" FM_STATE_OVERRIDE="$non_herdr/state" \
+    FM_DATA_OVERRIDE="$non_herdr/data" FM_CONFIG_OVERRIDE="$non_herdr/config" \
+    "$ROOT/bin/fm-teardown.sh" plain --force 2>&1)
+  status=$?
+  assert_not_contains "$out" 'unresolved Herdr role transition' \
+    "synthetic non-Herdr metadata was blocked by a Herdr transition sentinel"
+  pass "Herdr teardown: transition refusal applies only to validated Herdr metadata"
 }
 
 test_non_herdr_compatibility() {
-  local home out
+  local home out expected before status
   home="$TMP_ROOT/non-herdr/home"; mkdir -p "$home/state"
   printf '%s\n' 'window=fm-test' 'worktree=/tmp/fm-test' 'project=/tmp/project' \
     'kind=scout' 'custom=preserved' > "$home/state/plain.meta"
+  mkdir "$home/state/.spawn-plain.lock"
+  printf '%s\n' "$$" > "$home/state/.spawn-plain.lock/pid"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" plain 2>&1) \
-    || fail "non-Herdr promotion failed: $out"
-  [ "$(grep '^kind=' "$home/state/plain.meta")" = kind=ship ] || fail "non-Herdr kind did not become ship"
-  [ "$(grep '^custom=' "$home/state/plain.meta")" = custom=preserved ] || fail "non-Herdr metadata changed"
-  [ ! -e "$home/state/.spawn-plain.lock" ] || fail "non-Herdr task lock was not released"
-  pass "Promotion compatibility: non-Herdr metadata keeps the kind-only behavior"
+    || fail "non-Herdr promotion failed while its Herdr-only lock name was busy: $out"
+  expected=$(printf '%s\n' 'window=fm-test' 'worktree=/tmp/fm-test' 'project=/tmp/project' \
+    'custom=preserved' 'kind=ship')
+  [ "$(cat "$home/state/plain.meta")" = "$expected" ] \
+    || fail "non-Herdr metadata bytes differ from the legacy kind-only block"
+  [ -d "$home/state/.spawn-plain.lock" ] || fail "generic promotion touched an unrelated busy lock"
+
+  printf '%s\n' 'window=fm-test' 'worktree=/tmp/fm-test' 'project=/tmp/project' \
+    'kind=scout' 'backend=herdr' 'backend=fixture' > "$home/state/malformed.meta"
+  before=$(cat "$home/state/malformed.meta")
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$ROOT/bin/fm-promote.sh" malformed 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "competing backend fields fell through to generic promotion"
+  [ "$(cat "$home/state/malformed.meta")" = "$before" ] || fail "malformed Herdr claim changed metadata"
+  rm -rf "$home/state/.spawn-plain.lock"
+  pass "Promotion compatibility: generic bytes stay legacy while malformed Herdr claims refuse"
 }
 
 test_flat_success_and_unchanged_ids

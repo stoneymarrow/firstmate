@@ -67,10 +67,15 @@ A zellij spawn additionally version-gates against the installed `zellij` binary'
 A cmux spawn additionally version-gates against the installed `cmux` binary's version, requires `jq`, and requires the control socket to be reachable and accessible (see [`docs/cmux-backend.md`](cmux-backend.md) "Setup" for the one-time socket-access configuration this needs; Automation mode is the recommended socket control mode, with Password mode supported via `config/cmux-socket-password`), refusing loudly and non-retryably on a `cmuxOnly`/unauthenticated socket.
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
-A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=` as machine routing and verification identities.
-New Herdr task and second-mate parent records also carry optional display fields: `herdr_session_display_label=Shared Herdr session`, `display_label=`, `herdr_workspace_label=`, `herdr_tab_label=`, and `herdr_pane_label=`.
-The native-session alias is intentionally shared because Herdr 0.7.4 cannot rename a running session and one named session may contain several projects or homes.
-Display fields never enter selector resolution, socket lookup, liveness, capture, send, or mutation, and new Herdr task metadata publishes by validated same-directory rename so readers do not observe partial records.
+A Herdr task record requires exactly one `backend=herdr`, `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=` field; `window=` remains `<session>:<pane-id>` and splits on its first colon.
+Each Herdr identity must be non-empty and contain no whitespace or control byte.
+Herdr task and second-mate parent records may also carry at most one each of `herdr_session_display_label=Shared Herdr session`, `display_label=`, `herdr_workspace_label=`, `herdr_tab_label=`, and `herdr_pane_label=`.
+A recoverable second-mate parent record also requires one `kind=secondmate`, `task_id=`, `project=`, `home=`, and `worktree=` field; those three paths must name the same canonical child home, the task id must match its validated home marker, and all recorded labels must equal the adapter-derived second-mate labels.
+Legacy task records may omit any display field, but parent-only crash recovery requires the complete current parent schema.
+When present, each display value is non-empty, contains no control byte, and is at most 512 characters; the session alias accepts only the exact shared value shown above.
+The shared alias is honest because Herdr 0.7.4 cannot rename a running session and one named session may contain several projects or homes.
+Display fields never enter selector resolution, socket lookup, liveness, capture, send, or mutation.
+The native `firstmate · primary` tuple has no task ownership record.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
@@ -81,10 +86,11 @@ A metadata-routed selector returns the recorded backend target (`terminal=` for 
 Only metadata-routed task selectors carry secondmate-marker and Codex-harness context; explicit endpoint escape hatches do not.
 These five sentences are the single owner of the task-selector vocabulary; backend guides and other documents point here instead of restating the resolution order.
 `fm-teardown.sh <id>` takes a task id directly and uses the same recorded backend target fields after loading `state/<id>.meta`.
-By default, Herdr labels are derived from `FM_HOME`: a primary project workspace uses `<project> · primary`, and a secondmate home marked by `.fm-secondmate-home` uses `<secondmate-id> · second mate`.
+By default, Herdr labels are derived from `FM_HOME`: a primary-home project workspace uses `<project> · project`, while a secondmate home marked by `.fm-secondmate-home` uses `<secondmate-id> · second mate`.
 Worker, scout, and second-mate tabs and panes use the concise task or home subject plus the exact role, while ids remain the only machine targets.
-The default-container spawn, list-live, and recovery paths read that label from the active home, so a secondmate's own crewmates stay inside that secondmate home's Herdr space.
-Locked native Herdr session start separately relabels only its process-owned primary environment tuple to `firstmate · primary`; [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns that exact process and lock boundary.
+Exact legacy task metadata may corroborate the prior `<project> · primary` project-workspace spelling during migration, but that label alone cannot select a workspace.
+The default-container spawn, list-live, and recovery paths read the active home's label, so a secondmate's own workers stay inside that secondmate home's Herdr space.
+Locked native Herdr session start separately labels only its process-owned environment tuple `firstmate · primary`; [`herdr-backend.md`](herdr-backend.md#watching-and-task-containers) owns current operator behavior and limits.
 The optional local `config/herdr-presentation-spaces` presence flag instead enables Herdr's default-off disposable single-task visual projection; [Optional presentation spaces](herdr-backend.md#optional-presentation-spaces) owns its behavior, safety limits, recovery contract, and narrow locked session-start cleanup of exact restored idle-shell children.
 The flag is default-off and inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md).
 For normal herdr operations, `HERDR_SESSION` selects the named session, but destructive test cleanup must not rely on `HERDR_SESSION` alone.

@@ -486,7 +486,7 @@ printf 'Projection abort fixture A.\n' > "$HOME_DIR/data/abort-a/brief.md"
 printf 'Projection abort fixture B.\n' > "$HOME_DIR/data/abort-b/brief.md"
 printf 'Projection lock contention fixture.\n' > "$HOME_DIR/data/lock-contended/brief.md"
 make_project "$PROJECT_DIR"
-PRIMARY_PARENT_LABEL='payments · primary'
+PRIMARY_PARENT_LABEL='payments · project'
 FOCUS_FIXTURE_A_LABEL='fixture-alpha'
 FOCUS_FIXTURE_B_LABEL='fixture-bravo'
 
