@@ -111,10 +111,22 @@ FM_BACKEND_HERDR_SECONDMATE_MARKER=".fm-secondmate-home"
 # session lock. No send, capture, Treehouse, or general task-ownership path
 # reads it.
 FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX=".herdr-presentation"
+# A scout-to-ship promotion spans two live labels, one metadata record, and an
+# optional presentation binding. The exact-ID intent makes that forward-only
+# transaction recoverable without granting label-selected mutation authority.
+FM_BACKEND_HERDR_ROLE_TRANSITION_SUFFIX=".herdr-role-transition"
 
 # The adapter alone formats concise semantic labels; exact IDs only route.
 FM_BACKEND_HERDR_LABEL_SEPARATOR=' · '
 FM_BACKEND_HERDR_LABEL_MAX_SUBJECT=48
+# Herdr 0.7.4 has no native-session rename operation, and one running session
+# may carry several Firstmate homes and unrelated workspaces. This concise alias
+# is presentation data only; the named session remains the sole routing key.
+FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL='Shared Herdr session'
+
+fm_backend_herdr_session_display_label() {
+  printf '%s' "$FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL"
+}
 
 fm_backend_herdr_role_for_kind() {  # <task-kind>
   case "$1" in
@@ -128,12 +140,19 @@ fm_backend_herdr_role_for_kind() {  # <task-kind>
 fm_backend_herdr_format_label() {  # <concise-subject> <role>
   local subject=${1:-} role=${2:-}
   case "$role" in primary|worker|scout|'second mate') ;; *) return 1 ;; esac
-  case "$subject" in
-    ''|fm-*|2ndmate-*|firstmate|primary|worker|scout|secondmate|'second mate'|task|project|workspace|tab|pane|unknown|default|untitled|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*|*[!A-Za-z0-9])
-      echo "error: invalid herdr readable-label subject: $subject" >&2
+  if [ "$subject" = firstmate ]; then
+    [ "$role" = primary ] || {
+      echo "error: herdr readable-label subject 'firstmate' is reserved for the primary role" >&2
       return 1
-      ;;
-  esac
+    }
+  else
+    case "$subject" in
+      ''|fm-*|2ndmate-*|primary|worker|scout|secondmate|'second mate'|task|project|workspace|tab|pane|unknown|default|untitled|*[!A-Za-z0-9._-]*|[!A-Za-z0-9]*|*[!A-Za-z0-9])
+        echo "error: invalid herdr readable-label subject: $subject" >&2
+        return 1
+        ;;
+    esac
+  fi
   [ "${#subject}" -le "$FM_BACKEND_HERDR_LABEL_MAX_SUBJECT" ] || {
     echo "error: herdr readable-label subject exceeds $FM_BACKEND_HERDR_LABEL_MAX_SUBJECT characters" >&2
     return 1
@@ -957,7 +976,7 @@ fm_backend_herdr_metadata_validate_record() {  # <metadata-file>
         ;;
     esac
   done
-  for field in display_label herdr_workspace_label herdr_tab_label herdr_pane_label; do
+  for field in display_label herdr_session_display_label herdr_workspace_label herdr_tab_label herdr_pane_label; do
     count=$(grep -c "^${field}=" "$meta" 2>/dev/null || true)
     [ "$count" -le 1 ] || {
       echo "error: malformed herdr metadata in $meta: duplicate $field" >&2
@@ -972,6 +991,11 @@ fm_backend_herdr_metadata_validate_record() {  # <metadata-file>
       echo "error: malformed herdr metadata in $meta: oversized $field" >&2
       return 1
     }
+    if [ "$field" = herdr_session_display_label ] \
+       && [ "$value" != "$FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL" ]; then
+      echo "error: malformed herdr metadata in $meta: dishonest herdr_session_display_label" >&2
+      return 1
+    fi
   done
 }
 
@@ -989,17 +1013,20 @@ fm_backend_herdr_metadata_validate_home() {  # <state-directory>
 fm_backend_herdr_parent_metadata_write() {  # <path> <task-id> <home> <session> <workspace> <tab> <pane> <workspace-label> <task-label>
   local path=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7 workspace_label=$8 task_label=$9 tmp
   [ "$path" = "$FM_HOME/state/.herdr-parent.meta" ] || return 1
-  [ -d "$FM_HOME/state" ] || return 1
-  tmp="$path.tmp.$$"
-  (
-    umask 077
-    printf '%s\n' \
-      'backend=herdr' 'kind=secondmate' "task_id=$id" "project=$home" "home=$home" "worktree=$home" \
-      "herdr_session=$session" "herdr_workspace_id=$workspace" "herdr_tab_id=$tab" "herdr_pane_id=$pane" \
-      "display_label=$task_label" "herdr_workspace_label=$workspace_label" \
-      "herdr_tab_label=$task_label" "herdr_pane_label=$task_label" > "$tmp"
-  ) || { rm -f "$tmp"; return 1; }
-  mv "$tmp" "$path"
+  [ -d "$FM_HOME/state" ] && [ ! -L "$FM_HOME/state" ] || return 1
+  tmp=$(mktemp "$FM_HOME/state/.herdr-parent.meta.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! printf '%s\n' \
+    'backend=herdr' 'kind=secondmate' "task_id=$id" "project=$home" "home=$home" "worktree=$home" \
+    "herdr_session=$session" "herdr_session_display_label=$FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL" \
+    "herdr_workspace_id=$workspace" "herdr_tab_id=$tab" "herdr_pane_id=$pane" \
+    "display_label=$task_label" "herdr_workspace_label=$workspace_label" \
+    "herdr_tab_label=$task_label" "herdr_pane_label=$task_label" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  fm_backend_herdr_metadata_validate_record "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
 }
 
 fm_backend_herdr_metadata_load_tuple() {  # <metadata-file>
@@ -2228,6 +2255,510 @@ fm_backend_herdr_projection_endpoint_matches_journal() {  # <session> <workspace
   [ "$matches" = "$workspace_id" ]
 }
 
+fm_backend_herdr_role_transition_path() {  # <state-dir> <task-id>
+  printf '%s/%s%s' "$1" "$2" "$FM_BACKEND_HERDR_ROLE_TRANSITION_SUFFIX"
+}
+
+fm_backend_herdr_role_transition_field() {  # <intent> <key>
+  local intent=$1 key=$2 count
+  count=$(grep -c "^${key}=" "$intent" 2>/dev/null || true)
+  [ "$count" = 1 ] || return 1
+  grep "^${key}=" "$intent" 2>/dev/null | cut -d= -f2-
+}
+
+# Validate one private, exact-ID, forward-only scout-to-ship intent without
+# sourcing it. The captured old label is either the readable scout label or
+# the one documented legacy task label; recovery accepts no third spelling.
+fm_backend_herdr_role_transition_snapshot() {  # <intent> <task-id>
+  local intent=$1 id=$2 lines mode scout legacy worker exact
+  FM_BACKEND_HERDR_ROLE_INTENT_TASK_ID=""
+  FM_BACKEND_HERDR_ROLE_INTENT_HOME=""
+  FM_BACKEND_HERDR_ROLE_INTENT_SESSION=""
+  FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE=""
+  FM_BACKEND_HERDR_ROLE_INTENT_TAB=""
+  FM_BACKEND_HERDR_ROLE_INTENT_PANE=""
+  FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL=""
+  FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL=""
+  [ -f "$intent" ] && [ ! -L "$intent" ] || return 1
+  mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$intent") || return 1
+  [ "$mode" = 600 ] || return 1
+  lines=$(wc -l < "$intent" 2>/dev/null | tr -d '[:space:]')
+  [ "$lines" = 11 ] || return 1
+  [ "$(fm_backend_herdr_role_transition_field "$intent" version)" = 1 ] || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_TASK_ID=$(fm_backend_herdr_role_transition_field "$intent" task_id) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_HOME=$(fm_backend_herdr_role_transition_field "$intent" home) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_SESSION=$(fm_backend_herdr_role_transition_field "$intent" session) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE=$(fm_backend_herdr_role_transition_field "$intent" workspace_id) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_TAB=$(fm_backend_herdr_role_transition_field "$intent" tab_id) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_PANE=$(fm_backend_herdr_role_transition_field "$intent" pane_id) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL=$(fm_backend_herdr_role_transition_field "$intent" old_label) || return 1
+  FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL=$(fm_backend_herdr_role_transition_field "$intent" target_label) || return 1
+  [ "$(fm_backend_herdr_role_transition_field "$intent" from_kind)" = scout ] || return 1
+  [ "$(fm_backend_herdr_role_transition_field "$intent" to_kind)" = ship ] || return 1
+  [ "$FM_BACKEND_HERDR_ROLE_INTENT_TASK_ID" = "$id" ] || return 1
+  case "$FM_BACKEND_HERDR_ROLE_INTENT_HOME" in /*) ;; *) return 1 ;; esac
+  for exact in "$FM_BACKEND_HERDR_ROLE_INTENT_SESSION" \
+    "$FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE" \
+    "$FM_BACKEND_HERDR_ROLE_INTENT_TAB" \
+    "$FM_BACKEND_HERDR_ROLE_INTENT_PANE"; do
+    case "$exact" in ''|*[[:space:][:cntrl:]]*) return 1 ;; esac
+  done
+  scout=$(FM_HOME="$FM_BACKEND_HERDR_ROLE_INTENT_HOME" \
+    fm_backend_herdr_task_label "$id" scout) || return 1
+  worker=$(FM_HOME="$FM_BACKEND_HERDR_ROLE_INTENT_HOME" \
+    fm_backend_herdr_task_label "$id" ship) || return 1
+  legacy="fm-$id"
+  [ "$FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL" = "$scout" ] \
+    || [ "$FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL" = "$legacy" ] || return 1
+  [ "$FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL" = "$worker" ]
+}
+
+# Atomically publish a private role-transition intent before the first Herdr
+# rename. A hard link gives create-if-absent semantics across concurrent or
+# interrupted promotion attempts.
+fm_backend_herdr_role_transition_create() {  # <state> <task-id> <home> <session> <workspace> <tab> <pane> <old-label> <target-label>
+  local state=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
+  local old_label=$8 target_label=$9 intent tmp
+  intent=$(fm_backend_herdr_role_transition_path "$state" "$id")
+  if [ -e "$intent" ] || [ -L "$intent" ]; then
+    echo "error: herdr role-transition intent already exists for $id" >&2
+    return 1
+  fi
+  tmp=$(mktemp "$state/.${id}.herdr-role-transition.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  if ! {
+    printf 'version=1\n'
+    printf 'task_id=%s\n' "$id"
+    printf 'home=%s\n' "$home"
+    printf 'session=%s\n' "$session"
+    printf 'workspace_id=%s\n' "$workspace"
+    printf 'tab_id=%s\n' "$tab"
+    printf 'pane_id=%s\n' "$pane"
+    printf 'old_label=%s\n' "$old_label"
+    printf 'target_label=%s\n' "$target_label"
+    printf 'from_kind=scout\n'
+    printf 'to_kind=ship\n'
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! ln "$tmp" "$intent" 2>/dev/null; then
+    rm -f "$tmp"
+    echo "error: herdr role-transition intent appeared concurrently for $id" >&2
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+# A projected promotion keeps the exact journal-owned workspace and parent.
+# This shape check accepts a recoverable old/new tab-pane label mix because
+# the caller separately restricts each live label to the intent's two values.
+fm_backend_herdr_projection_role_transition_shape_matches() {  # <session> <token> <workspace> <tab> <pane> <parent-workspace> <parent-label> <workspace-label>
+  local session=$1 token=$2 workspace=$3 tab=$4 pane=$5 parent_workspace=$6
+  local parent_label=$7 workspace_label=$8 list tabs panes
+  list=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$list" | jq -e \
+    --arg token "$token" --arg workspace "$workspace" \
+    --arg parent_workspace "$parent_workspace" --arg parent_label "$parent_label" \
+    --arg workspace_label "$workspace_label" '
+      def is_new_child:
+        (.label | type) == "string"
+        and (.label | test("^└ .+ · p:[A-Za-z0-9_-]{22}$"));
+      def legacy_owner_for($owner):
+        if $owner == "firstmate" or ($owner | test("^2ndmate-[^/]+$")) then $owner
+        elif ($owner | endswith(" · primary")) then "firstmate"
+        elif ($owner | endswith(" · second mate")) then
+          "2ndmate-" + ($owner | sub(" · second mate$"; ""))
+        else null end;
+      def is_legacy_child_for($owner):
+        (legacy_owner_for($owner)) as $legacy_owner
+        | (.label | type) == "string" and $legacy_owner != null
+          and (.label | test("^(firstmate|2ndmate-[^/]+)/.+ · p:[A-Za-z0-9_-]{22}$"))
+          and (.label | startswith($legacy_owner + "/"));
+      (.result.workspaces // null) as $spaces
+      | select(($spaces | type) == "array")
+      | select(([$spaces[]? | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1)
+      | select(([$spaces[]? | select((.label | type) == "string" and (.label | endswith(" · p:" + $token)))] | length) == 1)
+      | select(([$spaces[]? | select(.workspace_id == $parent_workspace and .label == $parent_label)] | length) == 1)
+      | select(([$spaces[]? | select(.label == $parent_label)] | length) == 1)
+      | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $parent_workspace)]) as $parents
+      | ([range(0; $spaces | length) | select($spaces[.].workspace_id == $workspace)]) as $children
+      | select(($parents | length) == 1 and ($children | length) == 1)
+      | ($parents[0]) as $parent_index | ($children[0]) as $child_index
+      | select($child_index > $parent_index)
+      | reduce range($parent_index + 1; $child_index) as $i
+          (true; . and (($spaces[$i] | is_new_child) or ($spaces[$i] | is_legacy_child_for($parent_label))))
+      | select(. == true)
+    ' >/dev/null 2>&1 || return 1
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg workspace "$workspace" --arg tab "$tab" '
+    (.result.tabs | type) == "array" and (.result.tabs | length) == 1
+    and .result.tabs[0].workspace_id == $workspace
+    and .result.tabs[0].tab_id == $tab
+  ' >/dev/null 2>&1 || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  printf '%s' "$panes" | jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" '
+    (.result.panes | type) == "array" and (.result.panes | length) == 1
+    and .result.panes[0].workspace_id == $workspace
+    and .result.panes[0].tab_id == $tab
+    and .result.panes[0].pane_id == $pane
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_role_transition_collision_free() {  # <session> <tab-id> <pane-id> <target-label>
+  local session=$1 tab=$2 pane=$3 target=$4 tabs workspaces wsids workspace panes count
+  tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+  count=$(printf '%s' "$tabs" | jq -r --arg tab "$tab" --arg target "$target" \
+    '[.result.tabs[]? | select(.tab_id != $tab and .label == $target)] | length' 2>/dev/null) || return 1
+  [ "$count" = 0 ] || return 1
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[]?; (.workspace_id | type) == "string" and (.workspace_id | length) > 0)
+    and ([.result.workspaces[].workspace_id] | length) == ([.result.workspaces[].workspace_id] | unique | length)
+  ' >/dev/null 2>&1 || return 1
+  wsids=$(printf '%s' "$workspaces" | jq -r '.result.workspaces[].workspace_id' 2>/dev/null) || return 1
+  while IFS= read -r workspace; do
+    [ -n "$workspace" ] || continue
+    panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+    printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+    count=$(printf '%s' "$panes" | jq -r --arg pane "$pane" --arg target "$target" \
+      '[.result.panes[]? | select(.pane_id != $pane and .label == $target)] | length' 2>/dev/null) || return 1
+    [ "$count" = 0 ] || return 1
+  done <<EOF
+$wsids
+EOF
+}
+
+# Validate an optional presentation journal against this exact home and tuple.
+# Version 1 is token-to-workspace verified and never rewritten. Version 2 must
+# still name the legacy label. Version 3 may be the scout source or the exact
+# ship target only while a validated intent exists.
+fm_backend_herdr_role_transition_journal_preflight() {  # <state> <task-id> <home> <session> <workspace> <tab> <pane> <recorded-workspace-label> <old-label> <target-label> <recovering:0|1>
+  local state=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
+  local recorded_workspace_label=$8 old_label=$9 target_label=${10} recovering=${11}
+  local journal canonical_journal_home scout legacy
+  FM_BACKEND_HERDR_ROLE_JOURNAL_MODE=none
+  FM_BACKEND_HERDR_ROLE_JOURNAL_PATH=$(fm_backend_herdr_projection_journal_path "$state" "$id")
+  journal=$FM_BACKEND_HERDR_ROLE_JOURNAL_PATH
+  [ -e "$journal" ] || [ -L "$journal" ] || return 0
+  fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || {
+    echo "error: malformed or unsafe herdr presentation journal for $id" >&2
+    return 1
+  }
+  case "$FM_BACKEND_HERDR_JOURNAL_FORMAT_VERSION" in
+    1)
+      fm_backend_herdr_projection_endpoint_matches_journal \
+        "$session" "$workspace" "$journal" "$id" || {
+        echo "error: herdr version 1 presentation journal for $id does not match the exact endpoint" >&2
+        return 1
+      }
+      FM_BACKEND_HERDR_ROLE_JOURNAL_MODE=v1
+      return 0
+      ;;
+    2|3) ;;
+    *) return 1 ;;
+  esac
+  canonical_journal_home=$(fm_backend_herdr_projection_home_identity \
+    "$FM_BACKEND_HERDR_JOURNAL_HOME") || return 1
+  if [ "$FM_BACKEND_HERDR_JOURNAL_HOME" != "$home" ] \
+     || [ "$canonical_journal_home" != "$home" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_SESSION" != "$session" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" != "$workspace" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" != "$tab" ] \
+     || [ "$FM_BACKEND_HERDR_JOURNAL_PANE_ID" != "$pane" ]; then
+    echo "error: herdr presentation journal for $id crosses its exact home, session, or endpoint" >&2
+    return 1
+  fi
+  [ -z "$recorded_workspace_label" ] \
+    || [ "$recorded_workspace_label" = "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" ] || return 1
+  fm_backend_herdr_projection_role_transition_shape_matches \
+    "$session" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+    "$workspace" "$tab" "$pane" \
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID" \
+    "$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL" \
+    "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL" || {
+    echo "error: herdr presentation journal for $id does not match its exact live projected shape" >&2
+    return 1
+  }
+  scout=$(FM_HOME="$home" fm_backend_herdr_task_label "$id" scout) || return 1
+  legacy="fm-$id"
+  if [ "$FM_BACKEND_HERDR_JOURNAL_FORMAT_VERSION" = 2 ]; then
+    [ "$old_label" = "$legacy" ] \
+      && [ "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" = "$legacy" ] || return 1
+    FM_BACKEND_HERDR_ROLE_JOURNAL_MODE=v2
+    return 0
+  fi
+  case "$FM_BACKEND_HERDR_JOURNAL_TASK_KIND:$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL" in
+    "scout:$scout")
+      [ "$old_label" = "$scout" ] || return 1
+      FM_BACKEND_HERDR_ROLE_JOURNAL_MODE=v3-scout
+      ;;
+    "ship:$target_label")
+      [ "$recovering" = 1 ] || return 1
+      FM_BACKEND_HERDR_ROLE_JOURNAL_MODE=v3-ship
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_backend_herdr_role_transition_journal_publish() {  # <state> <task-id> <home> <session> <workspace> <tab> <pane> <recorded-workspace-label> <old-label> <target-label>
+  local state=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7
+  local recorded_workspace_label=$8 old_label=$9 target_label=${10}
+  local journal token journal_home journal_session journal_workspace journal_tab journal_pane
+  local parent_workspace parent_label workspace_label
+  fm_backend_herdr_role_transition_journal_preflight \
+    "$state" "$id" "$home" "$session" "$workspace" "$tab" "$pane" \
+    "$recorded_workspace_label" "$old_label" "$target_label" 1 || return 1
+  case "$FM_BACKEND_HERDR_ROLE_JOURNAL_MODE" in
+    none|v1|v3-ship) return 0 ;;
+    v2|v3-scout) ;;
+    *) return 1 ;;
+  esac
+  journal=$FM_BACKEND_HERDR_ROLE_JOURNAL_PATH
+  token=$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID
+  journal_home=$FM_BACKEND_HERDR_JOURNAL_HOME
+  journal_session=$FM_BACKEND_HERDR_JOURNAL_SESSION
+  journal_workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+  journal_tab=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
+  journal_pane=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
+  parent_workspace=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+  parent_label=$FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL
+  workspace_label=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL
+  fm_backend_herdr_projection_journal_write_v3 \
+    "$journal" "$id" ship "$token" "$journal_home" "$journal_session" \
+    "$journal_workspace" "$journal_tab" "$journal_pane" "$parent_workspace" \
+    "$parent_label" "$workspace_label" "$target_label"
+}
+
+fm_backend_herdr_role_transition_metadata_publish() {  # <metadata> <task-id> <target-label>
+  local meta=$1 id=$2 target_label=$3 state tmp line
+  state=$(dirname "$meta")
+  tmp=$(mktemp "$state/.${id}.meta.promote.XXXXXX") || return 1
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      kind=*|display_label=*|herdr_tab_label=*|herdr_pane_label=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" || { rm -f "$tmp"; return 1; } ;;
+    esac
+  done < "$meta"
+  {
+    printf 'kind=ship\n'
+    printf 'display_label=%s\n' "$target_label"
+    printf 'herdr_tab_label=%s\n' "$target_label"
+    printf 'herdr_pane_label=%s\n' "$target_label"
+  } >> "$tmp" || { rm -f "$tmp"; return 1; }
+  fm_backend_herdr_metadata_validate_record "$tmp" || { rm -f "$tmp"; return 1; }
+  [ "$(fm_backend_herdr_meta_field_exact "$tmp" kind)" = ship ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$tmp" display_label)" = "$target_label" ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$tmp" herdr_tab_label)" = "$target_label" ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$tmp" herdr_pane_label)" = "$target_label" ] \
+    || { rm -f "$tmp"; return 1; }
+  [ -f "$meta" ] && [ ! -L "$meta" ] || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$meta"
+}
+
+fm_backend_herdr_role_transition_metadata_label_allowed() {  # <metadata> <field> <old-label> <target-label>
+  local meta=$1 field=$2 old_label=$3 target_label=$4 count value
+  count=$(grep -c "^${field}=" "$meta" 2>/dev/null || true)
+  [ "$count" -le 1 ] || return 1
+  [ "$count" = 1 ] || return 0
+  value=$(fm_backend_herdr_meta_field_exact "$meta" "$field") || return 1
+  [ "$value" = "$old_label" ] || [ "$value" = "$target_label" ]
+}
+
+# Forward-only, adapter-owned scout-to-ship relabel. The caller holds the task
+# lock and the exact named-session lock in that order. Any failure after intent
+# publication leaves the validated intent in place, so rerunning promotion can
+# converge from any exact old/target mixture without rollback or label lookup.
+fm_backend_herdr_promote_scout_to_ship() {  # <state-dir> <metadata> <task-id>
+  local state=$1 meta=$2 id=$3 intent canonical_home backend kind window project
+  local session workspace tab pane scout worker legacy old_label recorded_workspace_label
+  local expected_workspace legacy_workspace live_workspace live_tab live_pane field recovering=0
+  [ "$meta" = "$state/$id.meta" ] || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  canonical_home=$(fm_backend_herdr_projection_home_identity "$FM_HOME") || return 1
+  fm_backend_herdr_metadata_validate_record "$meta" || return 1
+  backend=$(fm_backend_herdr_meta_field_exact "$meta" backend) || return 1
+  [ "$backend" = herdr ] || return 1
+  kind=$(fm_backend_herdr_meta_field_exact "$meta" kind) || return 1
+  case "$kind" in scout|ship) ;; *) return 1 ;; esac
+  window=$(fm_backend_herdr_meta_field_exact "$meta" window) || return 1
+  project=$(fm_backend_herdr_meta_field_exact "$meta" project) || return 1
+  case "$project" in /*) ;; *) return 1 ;; esac
+  fm_backend_herdr_metadata_load_tuple "$meta" || return 1
+  session=$FM_BACKEND_HERDR_META_SESSION
+  workspace=$FM_BACKEND_HERDR_META_WORKSPACE
+  tab=$FM_BACKEND_HERDR_META_TAB
+  pane=$FM_BACKEND_HERDR_META_PANE
+  [ "$window" = "$session:$pane" ] || {
+    echo "error: herdr metadata window does not match its exact session and pane" >&2
+    return 1
+  }
+  scout=$(FM_HOME="$canonical_home" fm_backend_herdr_task_label "$id" scout) || return 1
+  worker=$(FM_HOME="$canonical_home" fm_backend_herdr_task_label "$id" ship) || return 1
+  legacy="fm-$id"
+  recorded_workspace_label=$(fm_backend_herdr_meta_field_exact \
+    "$meta" herdr_workspace_label 2>/dev/null || true)
+
+  fm_backend_herdr_live_tuple_state "$session" "$workspace" "$tab" "$pane" 1 || {
+    echo "error: herdr promotion could not validate the exact live tuple" >&2
+    return 1
+  }
+  [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] || return 1
+  live_workspace=$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL
+  live_tab=$FM_BACKEND_HERDR_LIVE_TAB_LABEL
+  live_pane=$FM_BACKEND_HERDR_LIVE_PANE_LABEL
+  if [ -n "$recorded_workspace_label" ]; then
+    [ "$live_workspace" = "$recorded_workspace_label" ] || return 1
+  else
+    expected_workspace=$(FM_HOME="$canonical_home" \
+      fm_backend_herdr_workspace_label "$project") || return 1
+    legacy_workspace=$(FM_HOME="$canonical_home" \
+      fm_backend_herdr_workspace_legacy_label) || return 1
+    [ "$live_workspace" = "$expected_workspace" ] \
+      || [ "$live_workspace" = "$legacy_workspace" ] || return 1
+  fi
+  fm_backend_herdr_role_transition_collision_free "$session" "$tab" "$pane" "$worker" || {
+    echo "error: competing herdr worker label exists for $id" >&2
+    return 1
+  }
+
+  intent=$(fm_backend_herdr_role_transition_path "$state" "$id")
+  if [ -e "$intent" ] || [ -L "$intent" ]; then
+    fm_backend_herdr_role_transition_snapshot "$intent" "$id" || {
+      echo "error: malformed or unsafe herdr role-transition intent for $id" >&2
+      return 1
+    }
+    [ "$FM_BACKEND_HERDR_ROLE_INTENT_HOME" = "$canonical_home" ] \
+      && [ "$FM_BACKEND_HERDR_ROLE_INTENT_SESSION" = "$session" ] \
+      && [ "$FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE" = "$workspace" ] \
+      && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TAB" = "$tab" ] \
+      && [ "$FM_BACKEND_HERDR_ROLE_INTENT_PANE" = "$pane" ] \
+      && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL" = "$worker" ] || return 1
+    old_label=$FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL
+    recovering=1
+  else
+    [ "$kind" = scout ] || {
+      echo "error: kind=ship is valid only while resuming its exact herdr role-transition intent" >&2
+      return 1
+    }
+    if [ "$live_tab" != "$live_pane" ] \
+       || { [ "$live_tab" != "$scout" ] && [ "$live_tab" != "$legacy" ]; }; then
+      echo "error: herdr scout labels are not one exact readable or legacy source" >&2
+      return 1
+    fi
+    old_label=$live_tab
+  fi
+
+  [ "$live_tab" = "$old_label" ] || [ "$live_tab" = "$worker" ] || return 1
+  [ "$live_pane" = "$old_label" ] || [ "$live_pane" = "$worker" ] || return 1
+  for field in display_label herdr_tab_label herdr_pane_label; do
+    fm_backend_herdr_role_transition_metadata_label_allowed \
+      "$meta" "$field" "$old_label" "$worker" || {
+      echo "error: herdr metadata carries a foreign $field during promotion" >&2
+      return 1
+    }
+  done
+  fm_backend_herdr_role_transition_journal_preflight \
+    "$state" "$id" "$canonical_home" "$session" "$workspace" "$tab" "$pane" \
+    "$recorded_workspace_label" "$old_label" "$worker" "$recovering" || return 1
+
+  if [ "$recovering" = 0 ]; then
+    fm_backend_herdr_role_transition_create \
+      "$state" "$id" "$canonical_home" "$session" "$workspace" "$tab" "$pane" \
+      "$old_label" "$worker" || return 1
+  fi
+  fm_backend_herdr_role_transition_snapshot "$intent" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_ROLE_INTENT_HOME" = "$canonical_home" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TAB" = "$tab" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_PANE" = "$pane" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL" = "$old_label" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL" = "$worker" ] || return 1
+  fm_backend_herdr_live_tuple_state "$session" "$workspace" "$tab" "$pane" 1 || return 1
+  [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" = "$live_workspace" ] || return 1
+  live_tab=$FM_BACKEND_HERDR_LIVE_TAB_LABEL
+  live_pane=$FM_BACKEND_HERDR_LIVE_PANE_LABEL
+  [ "$live_tab" = "$old_label" ] || [ "$live_tab" = "$worker" ] || return 1
+  [ "$live_pane" = "$old_label" ] || [ "$live_pane" = "$worker" ] || return 1
+  fm_backend_herdr_role_transition_collision_free \
+    "$session" "$tab" "$pane" "$worker" || return 1
+
+  if [ "$live_tab" = "$old_label" ]; then
+    fm_backend_herdr_tab_rename_exact \
+      "$session" "$workspace" "$tab" "$worker" || {
+      echo "error: exact herdr tab relabel failed; retained role-transition intent" >&2
+      return 1
+    }
+  fi
+  fm_backend_herdr_live_tuple_state "$session" "$workspace" "$tab" "$pane" 1 || return 1
+  [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" = "$live_workspace" ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_TAB_LABEL" = "$worker" ] || return 1
+  live_pane=$FM_BACKEND_HERDR_LIVE_PANE_LABEL
+  [ "$live_pane" = "$old_label" ] || [ "$live_pane" = "$worker" ] || return 1
+  if [ "$live_pane" = "$old_label" ]; then
+    fm_backend_herdr_pane_rename_exact \
+      "$session" "$workspace" "$tab" "$pane" "$worker" || {
+      echo "error: exact herdr pane relabel failed; retained role-transition intent" >&2
+      return 1
+    }
+  fi
+  fm_backend_herdr_live_tuple_state "$session" "$workspace" "$tab" "$pane" 1 || return 1
+  [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" = "$live_workspace" ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_TAB_LABEL" = "$worker" ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_PANE_LABEL" = "$worker" ] || return 1
+
+  fm_backend_herdr_role_transition_journal_publish \
+    "$state" "$id" "$canonical_home" "$session" "$workspace" "$tab" "$pane" \
+    "$recorded_workspace_label" "$old_label" "$worker" || {
+    echo "error: herdr presentation binding relabel failed; retained role-transition intent" >&2
+    return 1
+  }
+  fm_backend_herdr_role_transition_metadata_publish "$meta" "$id" "$worker" || {
+    echo "error: herdr metadata relabel failed; retained role-transition intent" >&2
+    return 1
+  }
+
+  fm_backend_herdr_metadata_load_tuple "$meta" || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" kind)" = ship ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$meta" window)" = "$session:$pane" ] \
+    && [ "$FM_BACKEND_HERDR_META_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_META_WORKSPACE" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_META_TAB" = "$tab" ] \
+    && [ "$FM_BACKEND_HERDR_META_PANE" = "$pane" ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$meta" display_label)" = "$worker" ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_tab_label)" = "$worker" ] \
+    && [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_pane_label)" = "$worker" ] || return 1
+  fm_backend_herdr_live_tuple_state "$session" "$workspace" "$tab" "$pane" 1 || return 1
+  [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" = "$live_workspace" ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_TAB_LABEL" = "$worker" ] \
+    && [ "$FM_BACKEND_HERDR_LIVE_PANE_LABEL" = "$worker" ] || return 1
+  fm_backend_herdr_role_transition_collision_free "$session" "$tab" "$pane" "$worker" || return 1
+  fm_backend_herdr_role_transition_journal_preflight \
+    "$state" "$id" "$canonical_home" "$session" "$workspace" "$tab" "$pane" \
+    "$recorded_workspace_label" "$old_label" "$worker" 1 || return 1
+  case "$FM_BACKEND_HERDR_ROLE_JOURNAL_MODE" in
+    none|v1|v3-ship) ;;
+    *) return 1 ;;
+  esac
+  fm_backend_herdr_role_transition_snapshot "$intent" "$id" || return 1
+  [ "$FM_BACKEND_HERDR_ROLE_INTENT_HOME" = "$canonical_home" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_WORKSPACE" = "$workspace" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TAB" = "$tab" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_PANE" = "$pane" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_OLD_LABEL" = "$old_label" ] \
+    && [ "$FM_BACKEND_HERDR_ROLE_INTENT_TARGET_LABEL" = "$worker" ] || return 1
+  rm -f "$intent"
+}
+
 # fm_backend_herdr_parse_target: split "<session>:<pane_id>" (pane_id itself
 # contains a colon, e.g. "w1:p2") on the FIRST colon only. Sets
 # FM_BACKEND_HERDR_SESSION and FM_BACKEND_HERDR_PANE for the caller.
@@ -2819,32 +3350,83 @@ fm_backend_herdr_pane_for_tab() {  # <session> <workspace_id> <tab_id>
     '.result.panes[]? | select(.tab_id == $tab) | .pane_id' 2>/dev/null | head -1
 }
 
-# fm_backend_herdr_resolve_bare_selector: the live-tab-listing fallback for an
-# ad hoc selector with no meta (mirrors tmux's list-windows grep). Searches
-# every RUNNING named herdr session (herdr session list) for a tab whose label
-# matches <name>, since herdr sessions are not addressed by one ambient
-# server the way a single tmux server is. Rare path in practice (herdr tasks
-# normally carry meta), best-effort.
+# fm_backend_herdr_resolve_bare_selector: private metadata-free fallback.
+# Normal recorded routing never calls it. It scans every running named session
+# and returns only one globally unique matching tab that owns exactly one pane.
+# Any unreadable session, duplicate tab, empty tab, or multi-pane tab refuses.
 fm_backend_herdr_resolve_bare_selector() {  # <name>
-  local name=$1 sessions session tabs tab_id wsid pane_id
-  sessions=$(herdr session list --json 2>/dev/null | jq -r '.sessions[]? | select(.running == true) | .name' 2>/dev/null)
+  local name=$1 raw sessions session tabs matches record wsid tab_id panes pane_ids pane_id
+  local found=0 target=""
+  raw=$(herdr session list --json 2>/dev/null) || {
+    echo "error: herdr running-session inventory is unreadable" >&2
+    return 1
+  }
+  sessions=$(printf '%s' "$raw" | jq -er '
+    select((.sessions | type) == "array")
+    | [.sessions[]? | select(.running == true)
+       | .name | select(type == "string" and length > 0 and (test("[[:space:][:cntrl:]]") | not))]
+    | select(length == (unique | length))
+    | .[]
+  ' 2>/dev/null) || {
+    echo "error: herdr running-session inventory is ambiguous" >&2
+    return 1
+  }
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || continue
-    tab_id=$(printf '%s' "$tabs" | jq -r --arg want "$name" \
-      '.result.tabs[]? | select(.label == $want) | .tab_id' 2>/dev/null | head -1)
-    [ -n "$tab_id" ] || continue
-    wsid=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" '.result.tabs[]? | select(.tab_id == $tab) | .workspace_id' 2>/dev/null | head -1)
-    [ -n "$wsid" ] || continue
-    pane_id=$(fm_backend_herdr_pane_for_tab "$session" "$wsid" "$tab_id") || continue
-    [ -n "$pane_id" ] || continue
-    printf '%s:%s' "$session" "$pane_id"
-    return 0
+    tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || {
+      echo "error: herdr tab inventory is unreadable in running session '$session'" >&2
+      return 1
+    }
+    printf '%s' "$tabs" | jq -e '
+      (.result.tabs | type) == "array"
+      and all(.result.tabs[]?;
+        (.tab_id | type) == "string" and (.tab_id | length) > 0
+        and (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+        and (.label | type) == "string")
+    ' >/dev/null 2>&1 || {
+      echo "error: herdr tab inventory is malformed in running session '$session'" >&2
+      return 1
+    }
+    matches=$(printf '%s' "$tabs" | jq -r --arg want "$name" '
+      .result.tabs[]? | select(.label == $want) | [.workspace_id,.tab_id] | @tsv
+    ' 2>/dev/null) || return 1
+    while IFS= read -r record; do
+      [ -n "$record" ] || continue
+      wsid=${record%%$'\t'*}
+      tab_id=${record#*$'\t'}
+      [ -n "$wsid" ] && [ -n "$tab_id" ] && [ "$tab_id" != "$record" ] || return 1
+      panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || {
+        echo "error: herdr pane inventory is unreadable for matching tab '$name'" >&2
+        return 1
+      }
+      pane_ids=$(printf '%s' "$panes" | jq -er --arg workspace "$wsid" --arg tab "$tab_id" '
+        select((.result.panes | type) == "array")
+        | select(all(.result.panes[]?;
+            (.pane_id | type) == "string" and (.pane_id | length) > 0
+            and (.tab_id | type) == "string" and (.workspace_id | type) == "string"))
+        | [.result.panes[]?
+           | select(.workspace_id == $workspace and .tab_id == $tab)
+           | .pane_id]
+        | select(length == 1)
+        | .[0]
+      ' 2>/dev/null) || {
+        echo "error: matching herdr tab '$name' does not own exactly one readable pane" >&2
+        return 1
+      }
+      pane_id=$pane_ids
+      found=$((found + 1))
+      target="$session:$pane_id"
+    done <<EOF
+$matches
+EOF
   done <<EOF
 $sessions
 EOF
-  echo "error: no herdr tab named $name in any running session" >&2
-  return 1
+  if [ "$found" -ne 1 ]; then
+    echo "error: herdr tab '$name' is not globally unique across running sessions" >&2
+    return 1
+  fi
+  printf '%s' "$target"
 }
 
 # Recovery discovery enumerates only exact home-local metadata tuples. Display
@@ -2854,7 +3436,7 @@ EOF
 # the child task records stored in that home.
 fm_backend_herdr_list_live() {  # <session>
   local session=$1 state="$FM_HOME/state" parent_meta meta backend kind id project label_home secondmate_home
-  local workspace_label readable legacy workspace_list
+  local workspace_label recorded_workspace_label readable legacy workspace_list
   local live_workspace_label live_tab_label live_pane_label tuple seen="" lines=""
   fm_backend_herdr_metadata_validate_home "$state" || return 1
   parent_meta="$state/.herdr-parent.meta"
@@ -2880,6 +3462,16 @@ fm_backend_herdr_list_live() {  # <session>
     fi
     readable=$(FM_HOME="$label_home" fm_backend_herdr_task_label "$id" "$kind") || return 1
     workspace_label=$(FM_HOME="$label_home" fm_backend_herdr_workspace_label "$project") || return 1
+    recorded_workspace_label=$(fm_backend_herdr_meta_field_exact \
+      "$meta" herdr_workspace_label 2>/dev/null || true)
+    # Exact metadata may bind a disposable projected child workspace. Only
+    # that strict child-label shape replaces the recomputed parent label as the
+    # corroboration target. Flat exact metadata and legacy metadata without
+    # this field keep the prior readable/legacy parent rules below.
+    if printf '%s\n' "$recorded_workspace_label" \
+      | grep -Eq '^└ .+ · p:[A-Za-z0-9_-]{22}$'; then
+      workspace_label=$recorded_workspace_label
+    fi
     legacy="fm-$id"
     tuple="${FM_BACKEND_HERDR_META_WORKSPACE}"$'\t'"${FM_BACKEND_HERDR_META_TAB}"$'\t'"${FM_BACKEND_HERDR_META_PANE}"
     printf '%s' "$seen" | grep -Fqx "$tuple" && {

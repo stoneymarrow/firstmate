@@ -34,9 +34,14 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Watching and task containers
 
 Each Firstmate home gets one durable workspace with one task tab per endpoint.
-The primary workspace is `firstmate`.
-A secondmate home uses `2ndmate-<secondmate-id>`, derived from its validated `.fm-secondmate-home` marker.
+A primary project workspace uses `<project> · primary`.
+A secondmate home uses `<secondmate-id> · second mate`, derived from its validated `.fm-secondmate-home` marker.
+Worker, scout, and second-mate tabs and panes use their concise task or home subject plus the exact role.
 The secondmate process and every child it launches resolve the same home label; a secondmate launched by the primary receives a narrowly scoped home override during container creation.
+
+Herdr 0.7.4 cannot rename a running native session, and one named session can carry several projects, homes, and unrelated workspaces.
+Firstmate therefore displays the honest alias `Shared Herdr session` while retaining the native session name only as a machine route.
+The alias never enters a Herdr command, selector, socket lookup, liveness read, capture, send, or mutation.
 
 Attach to the selected named Herdr session and switch to the relevant home workspace to watch its task tabs.
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
@@ -44,12 +49,21 @@ Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.s
 Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
 
-Herdr does not enforce workspace or tab label uniqueness.
-Firstmate adopts the first workspace matching its derived home label and refuses duplicate task tabs inside it.
-Avoid naming a personal workspace `firstmate` or `2ndmate-<id>` because the adapter cannot distinguish that label collision from its own container.
+Locked native session start may rename the already-running primary workspace, tab, and pane to `firstmate · primary` through `bin/fm-herdr-primary-labels.sh`.
+The path is inert outside `HERDR_ENV=1`, in a marked secondmate home, or without the exact Herdr socket, workspace, tab, and pane environment identities.
+Before any rename, it requires the regular home session lock to name this harness ancestor, one running named session to own the exact socket, the shared machine-private socket-keyed session lock, the environment tuple to exist, and the exact pane process row to contain that lock owner with a physical current directory equal to the Firstmate root.
+It accepts only each object's legacy or empty label and the exact target, refuses a competing target label, mutates only the three environment-provided ids, verifies every response and the final tuple, and never closes an object.
+A partial response prints `HERDR_LABELS:` and leaves only the accepted old/new mix for the next locked startup to converge.
+An already-converged success stays silent, and a read-only session start never invokes this owner.
+
+Herdr does not enforce workspace, tab, or pane label uniqueness.
+Exact metadata tuples own existing Firstmate task discovery; labels only corroborate that identity and never authorize adoption or mutation.
+A duplicate target semantic label, unreadable inventory, or foreign current label causes refusal.
 An older secondmate workspace using `firstmate-<id>` is not migrated automatically; rename it manually before expecting new tasks or recovery to use it.
 
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
+Scout-to-ship promotion is the one supported role transition: it keeps a durable exact-ID intent, converges the recorded tab and pane forward from scout to worker, updates a matching presentation journal when present, and atomically replaces metadata.
+Teardown refuses while that intent remains unresolved.
 The per-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
@@ -63,7 +77,8 @@ An absent or unconverged setting keeps the flat default.
 Presentation is a best-effort visual projection, never task ownership or lifecycle authority.
 Only a fresh task with neither metadata nor an existing presentation journal is eligible for projected creation.
 Firstmate atomically publishes a three-field version 1 journal containing a random 128-bit base64url token before asking Herdr to create anything.
-After the new workspace converges to one exact task endpoint beneath one exact parent, the journal advances to a version 2 binding that records the physical home, named session, endpoint, parent, and immutable expected labels.
+After the new workspace converges to one exact task endpoint beneath one exact parent, the journal advances to a version 3 binding that records task kind, the readable task label, physical home, named session, endpoint, parent, and expected presentation labels.
+Version 2 remains a read-compatible legacy binding with `fm-<id>` as its required task label and migrates only through exact same-identity replacement or role transition.
 The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
@@ -89,7 +104,7 @@ If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
 Before any recovery mutation, Firstmate holds both the task spawn lock and the named-session presentation lock.
-A same-identity version 2 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, parent identity and placement, and non-target focus snapshot all agree.
+A same-identity version 2 or version 3 binding may replace one exact agent-free restart husk in place only when the physical home, session, metadata endpoint, unique token match, workspace shape and labels, task kind, parent identity and placement, and non-target focus snapshot all agree.
 The replacement tab and pane are created and verified before the old pane is rechecked and closed, then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
@@ -99,7 +114,7 @@ A live or unknown recorded or token-matched endpoint refuses duplicate launch.
 Locked session start has one narrower cleanup for a restored projected child that is no longer current task state.
 It runs only when the current home has at least one ordinary presentation journal and considers only that home; a primary never recursively sweeps a secondmate home.
 Discovery starts from the exact current `└ <concise-task> · p:<22-character-token>` grammar, but a title or token alone is never mutation authority.
-The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
+The title must contain exactly one token occurrence across the named-session snapshot and must equal the title derived from exactly one valid presentation journal in this home's own `state/`; a version 2 or version 3 journal additionally must bind this exact physical home, named session, workspace, tab, and pane.
 The task's ordinary metadata must be absent, and the candidate must have exactly one tab and exactly one pane.
 Before cleanup, Firstmate acquires the existing task-id spawn lock and then the shared named-session presentation lock.
 Inside both locks it takes one exact snapshot, requires one unambiguous non-target focus and the exact title, token, tab, and pane shape, positively confirms no registered agent, and reads Herdr's process information for the exact named-session pane.
@@ -113,7 +128,7 @@ A malformed or missing title or token, duplicate token, zero or multiple journal
 
 Operational compromises:
 
-- Grouping is best-effort; only an exact same-identity version 2 binding survives a Herdr restart in place.
+- Grouping is best-effort; only an exact same-identity version 2 or version 3 binding survives a Herdr restart in place.
 - Existing layouts are not force-renamed or rearranged.
 - Missing or ambiguous restart bindings fall back to the ordinary home workspace while the old projection remains untouched.
 - Crashes, lost responses, failed exact-pane cleanup, or human renames can leave quarantined spaces; session start removes only the exact home-local, uniquely journal-correlated, childless idle-shell shape above.
@@ -145,14 +160,26 @@ The current structural gate removes label inference from cleanup authority.
 backend=herdr
 window=<session>:<pane-id>
 herdr_session=<session>
+herdr_session_display_label=Shared Herdr session
 herdr_workspace_id=<workspace-id>
 herdr_tab_id=<tab-id>
 herdr_pane_id=<pane-id>
+display_label=<subject> · <role>
+herdr_workspace_label=<subject> · <role>
+herdr_tab_label=<subject> · <role>
+herdr_pane_label=<subject> · <role>
 ```
 
 A Herdr pane id contains a colon, so the adapter splits `window=` on the first colon only.
 The recorded pane is the operational fast path.
 Workspace and tab ids support verification and cleanup but are not inferred from mutable labels during normal operation.
+The session and object display fields are optional for legacy records, unique and bounded when present, and never routing authority.
+New Herdr task metadata and second-mate parent metadata include the honest session alias and publish through a validated same-directory temporary file plus rename so a reader cannot observe a partial record.
+
+For Herdr records, session start, fleet JSON, fleet view, crew state, send errors, and interactive peek place the readable label before the machine target.
+Fleet JSON keeps schema `fm-fleet-snapshot.v1` and preserves `endpoint.target` while adding Herdr-only `display_label` and `session_display_label` keys before it.
+Crew state keeps the leading `state:` and `source:` grammar.
+A successful send remains silent, and piped peek remains raw capture bytes; only interactive peek adds the label-first header.
 
 ## Current transport behavior
 
@@ -274,6 +301,10 @@ tests/fm-backend-herdr-smoke.test.sh
 tests/fm-backend-herdr-prune-safety-e2e.test.sh
 tests/fm-backend-herdr-respawn-idem-e2e.test.sh
 tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
+tests/fm-backend-herdr-labels.test.sh
+tests/fm-herdr-primary-labels.test.sh
+tests/fm-herdr-display-surfaces.test.sh
+tests/fm-promote-herdr.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-herdr-session-cleanup.test.sh

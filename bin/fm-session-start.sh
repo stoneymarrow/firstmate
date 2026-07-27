@@ -27,8 +27,9 @@
 #
 #   1. lock          - acquire the per-home session lock FIRST, before any
 #                       mutating step runs.
-#   2. bootstrap      - home-local stale Herdr projection cleanup runs only
-#                       when this session actually holds the lock. Detect-only
+#   2. bootstrap      - exact native Herdr primary-label convergence and
+#                       home-local stale Herdr projection cleanup run only when
+#                       this session actually holds the lock. Detect-only
 #                       diagnostics always run. Bootstrap's five MUTATING sweeps
 #                       (legacy PR-check migration, secondmate fast-forward,
 #                       secondmate liveness, X-mode artifact writes, fleet sync)
@@ -65,8 +66,8 @@
 # tasks-axi and quota-axi tool checks, and tasks-axi availability - none of
 # which mutate shared state and all of which are safe to compute without
 # verified lock ownership.
-# Only projection cleanup, the five bootstrap mutating sweeps, and the
-# wake-queue drain are skipped.
+# Only native Herdr primary-label convergence, projection cleanup, the five
+# bootstrap mutating sweeps, and the wake-queue drain are skipped.
 # The context and fleet-state digests
 # below are always read-only, so they run unconditionally in both modes.
 #
@@ -256,7 +257,7 @@ if [ "$LOCK_RC" -ne 0 ]; then
     printf '%s\n' "$BAR"
     printf '●  READ-ONLY SESSION - FLEET LOCK OWNERSHIP WAS NOT VERIFIED\n'
     printf '●  %s\n' "$LOCK_OUT"
-    printf '●  Skipping every mutating step: PR-check migration, stale Herdr child cleanup,\n'
+    printf '●  Skipping every mutating step: native Herdr labels, PR-check migration, stale Herdr child cleanup,\n'
     printf '●  secondmate sync, X-mode artifacts, fleet sync, and wake-queue drain. Detect-only bootstrap\n'
     printf '●  diagnostics and the rest of this read-only-safe digest still ran below.\n'
     printf '●  Operate read-only until this resolves - do not spawn, steer, merge, or\n'
@@ -271,6 +272,7 @@ if [ "$READ_ONLY" -eq 1 ]; then
   BOOT_OUT=$(FM_BOOTSTRAP_DETECT_ONLY=1 "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1)
 else
   BOOT_OUT=$(
+    "$SCRIPT_DIR/fm-herdr-primary-labels.sh" 2>&1 || true
     "$SCRIPT_DIR/fm-herdr-session-cleanup.sh" 2>&1 || true
     "$SCRIPT_DIR/fm-bootstrap.sh" 2>&1
   )
@@ -351,16 +353,32 @@ for meta in "$STATE"/*.meta; do
   META_FOUND=1
   id=$(basename "$meta" .meta)
   printf '\n--- %s ---\n' "$id"
-  cat "$meta"
-
+  backend=$(fm_backend_of_meta "$meta")
   window=$(fm_meta_get "$meta" window)
   target=$(fm_backend_target_of_meta "$meta")
+  if [ "$backend" = herdr ]; then
+    display_label=$(fm_meta_get "$meta" display_label)
+    session_display_label=$(fm_meta_get "$meta" herdr_session_display_label)
+    printf 'display: label=%s session=%s target=%s\n' \
+      "${display_label:--}" "${session_display_label:--}" "${target:-${window:--}}"
+  fi
+  cat "$meta"
+
   if [ -n "$window" ]; then
-    backend=$(fm_backend_of_meta "$meta")
     if fm_backend_target_exists "$backend" "${target:-$window}" "fm-$id"; then
-      printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      if [ "$backend" = herdr ]; then
+        printf 'endpoint: alive (backend=herdr label=%s session=%s target=%s)\n' \
+          "${display_label:--}" "${session_display_label:--}" "${target:-$window}"
+      else
+        printf 'endpoint: alive (backend=%s window=%s)\n' "$backend" "$window"
+      fi
     else
-      printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      if [ "$backend" = herdr ]; then
+        printf 'endpoint: dead (backend=herdr label=%s session=%s target=%s)\n' \
+          "${display_label:--}" "${session_display_label:--}" "${target:-$window}"
+      else
+        printf 'endpoint: dead (backend=%s window=%s)\n' "$backend" "$window"
+      fi
     fi
   else
     printf 'endpoint: unknown (no window recorded)\n'

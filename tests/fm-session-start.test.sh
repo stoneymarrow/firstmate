@@ -413,11 +413,14 @@ SH
 run_session_start() {
   local home=$1 root=$2 path=$3 pi_harness=${4:-}
   if [ -n "$pi_harness" ]; then
-    env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
+    env -u CLAUDECODE -u GROK_AGENT \
+      -u HERDR_SOCKET_PATH -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID \
+      PI_CODING_AGENT=true FM_PI_HARNESS="$pi_harness" \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   else
     env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
+      -u HERDR_SOCKET_PATH -u HERDR_WORKSPACE_ID -u HERDR_TAB_ID -u HERDR_PANE_ID \
       FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" \
       "$SESSION_START"
   fi
@@ -985,7 +988,7 @@ EOF
   assert_not_contains "$out" "SECONDMATE_LIVENESS:" "successful Herdr husk recovery should stay non-actionable"
   assert_contains "$(cat "$log")" "pane close p-old" "session start did not close the confirmed Herdr husk"
   assert_contains "$(cat "$log")" "tab create" "session start did not relaunch the Herdr secondmate"
-  assert_contains "$out" "endpoint: alive (backend=herdr window=default:p-new)" \
+  assert_contains "$out" "endpoint: alive (backend=herdr label=$SESSION_START_HERDR_SECOND_MATE_ID · second mate session=Shared Herdr session target=default:p-new)" \
     "the later fleet read did not confirm the relaunched Herdr endpoint"
   assert_grep 'herdr_pane_id=p-new' "$home/state/$SESSION_START_HERDR_SECOND_MATE_ID.meta" \
     "the real respawn path did not record the replacement Herdr pane"
@@ -1028,8 +1031,8 @@ EOF
   printf 'window=sess:p-dead\nkind=ship\nbackend=herdr\n' > "$home/state/task-dead.meta"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
-  assert_contains "$out" "endpoint: alive (backend=herdr window=sess:p-live)" "live herdr endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=herdr window=sess:p-dead)" "dead herdr endpoint not reported dead"
+  assert_contains "$out" "endpoint: alive (backend=herdr label=- session=- target=sess:p-live)" "live herdr endpoint not reported alive"
+  assert_contains "$out" "endpoint: dead (backend=herdr label=- session=- target=sess:p-dead)" "dead herdr endpoint not reported dead"
 
   pass "herdr endpoint liveness is reported per task: alive for a live pane, dead for a gone one"
 }

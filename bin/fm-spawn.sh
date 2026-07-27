@@ -31,13 +31,16 @@
 #   local config/herdr-presentation-spaces flag exists. A clean fresh task first
 #   writes state/<id>.herdr-presentation atomically, then creates a disposable
 #   workspace containing only the ordinary task pane. A successful clean create
-#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
+#   upgrades its attempt journal with exact task kind, readable label, home,
+#   session, workspace, tab, pane, parent, and presentation-label bindings. On a
+#   same-identity restart, that complete binding
 #   plus authoritative metadata may replace one exact agent-free husk in place.
 #   The journal, visible token, and labels alone are never endpoint or ownership
 #   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   duplicate-agent risk is independently absent. Treehouse allocation is
+#   unchanged. New Herdr task metadata carries the honest display-only shared
+#   session alias and publishes through a validated same-directory temporary
+#   file plus rename; every non-Herdr metadata path keeps direct publication.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -231,6 +234,7 @@ HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
+HERDR_META_TEMP=
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
@@ -272,6 +276,10 @@ spawn_abort_cleanup() {
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
     fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
+  fi
+  if [ -n "$HERDR_META_TEMP" ]; then
+    rm -f "$HERDR_META_TEMP" 2>/dev/null || true
+    HERDR_META_TEMP=
   fi
   if [ "$ORCA_ABORT_CLEANUP" = 1 ]; then
     ORCA_ABORT_CLEANUP=0
@@ -1459,6 +1467,12 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+META_OUTPUT="$STATE/$ID.meta"
+if [ "$BACKEND" = herdr ]; then
+  HERDR_META_TEMP=$(mktemp "$STATE/.${ID}.meta.spawn.XXXXXX") || exit 1
+  chmod 0600 "$HERDR_META_TEMP" || exit 1
+  META_OUTPUT=$HERDR_META_TEMP
+fi
 {
   echo "window=$META_WINDOW"
   echo "worktree=$WT"
@@ -1476,6 +1490,7 @@ META_WINDOW=$T
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
+    echo "herdr_session_display_label=$(fm_backend_herdr_session_display_label)"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
     echo "herdr_tab_id=$HERDR_TAB_ID"
     echo "herdr_pane_id=$HERDR_PANE_ID"
@@ -1501,7 +1516,14 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_OUTPUT"
+if [ "$BACKEND" = herdr ]; then
+  fm_backend_herdr_metadata_validate_record "$HERDR_META_TEMP" || exit 1
+  [ "$(fm_backend_herdr_meta_field_exact "$HERDR_META_TEMP" herdr_session_display_label)" \
+    = "$(fm_backend_herdr_session_display_label)" ] || exit 1
+  mv -f "$HERDR_META_TEMP" "$STATE/$ID.meta" || exit 1
+  HERDR_META_TEMP=
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")

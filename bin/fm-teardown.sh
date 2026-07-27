@@ -45,6 +45,8 @@
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
+# Teardown always refuses while this exact task has a Herdr role-transition
+# intent, including under --force, so cleanup cannot strand a partial relabel.
 # Secondmates (kind=secondmate in meta) are retired explicitly. Normal
 # teardown refuses while their home has in-flight crewmate meta files; --force
 # is the approved discard path that prevalidates child removal targets, discards
@@ -124,6 +126,11 @@ WT=$(grep '^worktree=' "$META" | cut -d= -f2-)
 T=$(grep '^window=' "$META" | cut -d= -f2-)
 PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
+HERDR_ROLE_TRANSITION_INTENT="$STATE/$ID.herdr-role-transition"
+if [ -e "$HERDR_ROLE_TRANSITION_INTENT" ] || [ -L "$HERDR_ROLE_TRANSITION_INTENT" ]; then
+  echo "REFUSED: task $ID has an unresolved Herdr role transition; rerun promotion before cleanup." >&2
+  exit 1
+fi
 if [ "$BACKEND" = orca ]; then
   T_ORCA=$(grep '^terminal=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$T_ORCA" ] && T=$T_ORCA

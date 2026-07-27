@@ -30,6 +30,8 @@
 #     against current_state; hints.pending_decision and hints.blocked_event are
 #     booleans derived from that set.
 #     endpoint.exists is the cheap backend endpoint-presence read.
+#     Herdr endpoints add display_label and session_display_label before the
+#     unchanged endpoint.target; every other endpoint object keeps its prior keys.
 #     endpoint.agent_alive is populated for secondmates only, where it is useful
 #     return-channel supervision data; other tasks use "not_checked".
 #   scout_reports[]: present data/<id>/report.md pointers.
@@ -398,7 +400,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree home projects backend target display_label session_display_label status_log report_path
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
@@ -417,6 +419,12 @@ task_json_lines() {
     projects=$(meta_value "$meta" projects)
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
+    display_label=
+    session_display_label=
+    if [ "$backend" = herdr ]; then
+      display_label=$(meta_value "$meta" display_label)
+      session_display_label=$(meta_value "$meta" herdr_session_display_label)
+    fi
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
     pr=$(meta_value "$meta" pr)
@@ -498,6 +506,8 @@ task_json_lines() {
       --arg home "$home" \
       --arg projects "$projects" \
       --arg backend "$backend" \
+      --arg display_label "$display_label" \
+      --arg session_display_label "$session_display_label" \
       --arg target "$target" \
       --arg pr "$pr" \
       --arg pr_source "$pr_source" \
@@ -532,11 +542,20 @@ task_json_lines() {
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
         current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
-        endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
-          status:(if $endpoint_exists == false then "absent"
-                  elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
-                  else "unknown" end),
-          observed_at:$observed_at,freshness:"fresh"},
+        endpoint:(
+          (if $backend == "herdr" then
+             {display_label:($display_label | if . == "" then null else . end),
+              session_display_label:($session_display_label | if . == "" then null else . end),
+              target:($target | if . == "" then null else . end)}
+           else
+             {target:($target | if . == "" then null else . end)}
+           end)
+          + {exists:$endpoint_exists,agent_alive:$agent_alive,
+             status:(if $endpoint_exists == false then "absent"
+                     elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
+                     else "unknown" end),
+             observed_at:$observed_at,freshness:"fresh"}
+        ),
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
         hints:{
           pending_decision:$pending_decision,

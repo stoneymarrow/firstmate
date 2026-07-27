@@ -78,9 +78,14 @@ FM_CREW_STATE_RUNS_LIMIT=${FM_CREW_STATE_RUNS_LIMIT:-200}
 case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;; esac
 SEP=' · '
 
-# Emit the one canonical line and exit 0. Detail is optional.
+# Emit the one canonical line and exit 0. Herdr metadata adds its readable
+# label and recorded machine target after the stable state/source grammar and
+# before any state detail. Other backends retain byte-identical output.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  if [ "${TASK_BACKEND:-}" = herdr ]; then
+    line="$line${SEP}label: ${HERDR_DISPLAY_LABEL:--}${SEP}target: ${BACKEND_TARGET:--}"
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -98,6 +103,10 @@ WT=$(meta_value worktree)
 KIND=$(meta_value kind)
 HARNESS=$(meta_value harness)
 [ -n "$KIND" ] || KIND=ship
+TASK_BACKEND=$(fm_backend_of_meta "$META")
+BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
+HERDR_DISPLAY_LABEL=
+[ "$TASK_BACKEND" != herdr ] || HERDR_DISPLAY_LABEL=$(meta_value display_label)
 
 # A torn-down (or never-created) worktree has no current state to read.
 if [ -z "$WT" ] || [ ! -d "$WT" ]; then
@@ -140,8 +149,6 @@ LOG_VERB=$(status_line_verb "$LOG_LINE")
 # state (e.g. done) instead of being masked as unknown. Backend-aware
 # (fm_backend_of_meta defaults absent backend= to tmux, the P1 contract): a
 # herdr task is read through fm_backend_capture instead of a bare tmux probe.
-TASK_BACKEND=$(fm_backend_of_meta "$META")
-BACKEND_TARGET=$(fm_backend_target_of_meta "$META")
 EXPECTED_LABEL="fm-$ID"
 pane_readable() {  # <target>
   case "$TASK_BACKEND" in
