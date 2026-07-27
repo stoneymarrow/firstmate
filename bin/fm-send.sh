@@ -102,8 +102,23 @@ fm_send_count_colons() {  # <string>
   printf '%s' $(( ${#s} - ${#no_colons} ))
 }
 
+# Human error context for one recorded endpoint. The readable Herdr label and
+# display-only shared-session alias lead the machine target; non-Herdr wording
+# stays byte-identical.
+fm_send_describe_meta_target() {  # <metadata> <target>
+  local meta=$1 target=$2 backend label session_label
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = herdr ]; then
+    label=$(fm_meta_get "$meta" display_label)
+    session_label=$(fm_meta_get "$meta" herdr_session_display_label)
+    printf "label '%s' session '%s' target '%s'" "${label:--}" "${session_label:--}" "$target"
+  else
+    printf '%s' "$target"
+  fi
+}
+
 fm_send_resolve_target() {  # <raw-target>
-  local raw=$1 meta pane_meta target backend assumed colons id session hint
+  local raw=$1 meta pane_meta target backend assumed colons id session hint description
 
   RESOLVED_TARGET=""
   TARGET_BACKEND=""
@@ -144,7 +159,8 @@ fm_send_resolve_target() {  # <raw-target>
     session=$(fm_meta_get "$pane_meta" herdr_session)
     hint="${session:-<herdr-session>}:$raw"
     id=$(fm_send_id_from_meta "$pane_meta")
-    echo "error: target '$raw' matches herdr_pane_id in $pane_meta but is missing its herdr session prefix; expected <herdr-session>:<pane-id> such as '$hint' or use 'fm-$id' (tried meta=$STATE/$raw.meta; backend=herdr)" >&2
+    description=$(fm_send_describe_meta_target "$pane_meta" "$hint")
+    echo "error: target '$raw' matches herdr_pane_id in $pane_meta but is missing its herdr session prefix; expected <herdr-session>:<pane-id> as $description or use 'fm-$id' (tried meta=$STATE/$raw.meta; backend=herdr)" >&2
     return 1
   fi
 
@@ -189,6 +205,10 @@ fm_send_resolve_target() {  # <raw-target>
 RAW_TARGET=$1
 fm_send_resolve_target "$RAW_TARGET" || exit 1
 T=$RESOLVED_TARGET
+TARGET_ERROR_REF=$T
+if [ "$TARGET_BACKEND" = herdr ] && [ -n "$TARGET_META" ]; then
+  TARGET_ERROR_REF=$(fm_send_describe_meta_target "$TARGET_META" "$T")
+fi
 shift
 
 fm_backend_validate "$TARGET_BACKEND" || exit 1
@@ -221,7 +241,7 @@ fi
 
 if [ "${1:-}" = "--key" ]; then
   if ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$2" "$EXPECTED_LABEL"; then
-    echo "error: key '$2' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+    echo "error: key '$2' not sent to $TARGET_ERROR_REF ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
 else
@@ -274,7 +294,7 @@ else
     if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
       fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
     fi
-    echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+    echo "error: text not sent to $TARGET_ERROR_REF ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
   fi
   case "$verdict" in
@@ -284,14 +304,14 @@ else
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: text not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
+      echo "error: text not sent to $TARGET_ERROR_REF ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
     *)
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi
-      echo "error: text not submitted to $T (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
+      echo "error: text not submitted to $TARGET_ERROR_REF (delivery unconfirmed; verdict=${verdict:-unknown}; tried $RESOLUTION_TRIED)" >&2
       exit 1
       ;;
   esac
@@ -303,9 +323,9 @@ else
     else
       delivery_commit_status=$?
       if [ "$delivery_commit_status" = 2 ]; then
-        echo "error: text was delivered to $T, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
+        echo "error: text was delivered to $TARGET_ERROR_REF, but its pending-reply delivery commit failed; a durable recovery marker was stored and the watcher will reconcile it. Do not resend." >&2
       else
-        echo "error: text was delivered to $T, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
+        echo "error: text was delivered to $TARGET_ERROR_REF, but its pending-reply delivery commit and recovery marker both failed. Do not resend; inspect $STATE manually." >&2
       fi
       exit 1
     fi

@@ -34,9 +34,13 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if $t.endpoint.exists == null then "unknown"
     elif $t.endpoint.exists then "present"
     else "absent" end;
-  def endpoint_of($t):
+  def endpoint_status($t):
     if $t.kind == "secondmate" then "\(endpoint_exists($t)) / \($t.endpoint.agent_alive)"
     else endpoint_exists($t) end;
+  def endpoint_of($t):
+    if $t.backend == "herdr" then
+      "\(dash($t.endpoint.display_label)) / \(dash($t.endpoint.session_display_label)) / \(dash($t.endpoint.target)) / \(endpoint_status($t))"
+    else endpoint_status($t) end;
   def artifact($t):
     if $t.pr.url != null then $t.pr.url
     elif $t.paths.report.present then $t.paths.report.path

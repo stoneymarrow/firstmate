@@ -145,6 +145,45 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: a restored no-agent tab was replaced create-before-close, while a registered live agent caused refusal.
 
+### Readable labels and display isolation
+
+The remaining label subsystem has fixture-only proof dated 2026-07-27.
+These commands used fake Herdr inventories and did not read, rename, close, or otherwise mutate a live Herdr session:
+
+```sh
+bash tests/fm-backend-herdr-labels.test.sh
+bash tests/fm-herdr-primary-labels.test.sh
+bash tests/fm-herdr-display-surfaces.test.sh
+bash tests/fm-promote-herdr.test.sh
+```
+
+Observed focused output included:
+
+```text
+ok - Herdr labels: firstmate subject is reserved to the primary role
+ok - Herdr metadata: native-session alias is exact, display-only, and parent-published
+ok - Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse
+ok - Herdr primary labels: session start calls owner only on locked path before bootstrap
+ok - Herdr primary labels: exact lock/process/cwd ownership converges by exact ids
+ok - Herdr primary labels: unsafe lock/process/cwd/socket/label/collision inputs refuse before rename
+ok - Herdr primary labels: partial old/new mix converges on the next locked startup
+ok - Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first
+ok - Display isolation: synthetic non-Herdr state and snapshot output remain unchanged
+ok - Herdr display: send is silent on success, label-first on errors, and routes exact ids
+ok - Herdr display: piped peek stays raw and interactive peek adds a label-first header
+ok - Herdr metadata: new task record uses validated same-directory rename and carries session alias
+ok - Herdr promotion: partial tab/pane failure retains intent and retry converges forward
+ok - Herdr teardown: unresolved exact-ID role-transition intent refuses cleanup
+```
+
+The fixtures prove formatter role boundaries, the honest `Shared Herdr session` metadata field, global bare-selector uniqueness, lock/process/cwd ownership refusals, exact-ID response verification, partial forward convergence, label-first rendering, routing byte preservation, same-directory metadata publication shape, and recoverable scout-to-ship relabeling.
+They do not prove that the current live primary, worker, or second mate has been renamed.
+
+The guarded current-live proof remains pending because this implementation lane had no authority to touch live Herdr state.
+That proof must run from one lock-owning native Herdr primary with the exact `HERDR_SOCKET_PATH`, `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID` environment tuple, then inspect those same ids through explicit named-session reads after locked startup.
+It must also inspect one newly published worker record and one newly published second-mate parent record, confirm their exact ids and readable labels plus the shared display-only session alias, and repeat the checks after one fresh-session rollover or supported recovery.
+The proof is complete only if the labels remain distinct and accurate, the machine targets remain unchanged, no `HERDR_LABELS:` diagnostic remains, and no live object was selected or mutated by label.
+
 ### Per-home and presentation topology
 
 Per-home behavior is owned by:

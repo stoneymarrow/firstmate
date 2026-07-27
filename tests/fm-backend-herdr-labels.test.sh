@@ -158,6 +158,56 @@ test_prefix_free_list_live_uses_only_exact_local_metadata() {
   pass "Herdr list_live: exact local tuple is prefix-free and no parent is inferred"
 }
 
+# Exact projected metadata corroborates its recorded child workspace label.
+# Discovery must not replace it with the recomputed parent-project label.
+test_projected_list_live_uses_recorded_workspace_label() {
+  local dir home meta log fake out token child
+  dir="$TMP_ROOT/list-live-projected"; home="$dir/home"; mkdir -p "$home/state"
+  token=AbCdEfGhIjKlMnOpQrStUv
+  child="└ invoice-check · p:$token"
+  meta="$home/state/invoice-check.meta"
+  metadata "$meta" ship /srv/payments w2 w2:t2 w2:p2
+  printf '%s\n' \
+    'display_label=invoice-check · worker' \
+    "herdr_workspace_label=$child" \
+    'herdr_tab_label=invoice-check · worker' \
+    'herdr_pane_label=invoice-check · worker' >> "$meta"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"payments · primary\"},{\"workspace_id\":\"w2\",\"label\":\"$child\"}]}}"
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"w2","tab_id":"w2:t2","label":"invoice-check · worker"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"w2","pane_id":"w2:p2","tab_id":"w2:t2"}]}}'
+  response "$dir" 4 '{"result":{"pane":{"workspace_id":"w2","tab_id":"w2:t2","pane_id":"w2:p2","label":"invoice-check · worker"}}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_list_live fmtest) \
+    || fail "projected exact list_live refused its recorded child label"
+  [ "$out" = $'fmtest:w2:p2\tinvoice-check · worker' ] \
+    || fail "projected list_live output mismatch: $out"
+  pass "Herdr list_live: exact projected child uses its recorded workspace label"
+}
+
+# The projected exception does not let an arbitrary exact metadata label
+# replace the derived flat-workspace contract.
+test_flat_list_live_refuses_arbitrary_recorded_workspace_label() {
+  local dir home meta log fake out status
+  dir="$TMP_ROOT/list-live-flat-foreign"; home="$dir/home"; mkdir -p "$home/state"
+  meta="$home/state/invoice-check.meta"
+  metadata "$meta" ship /srv/payments w1 w1:t1 w1:p1
+  printf '%s\n' \
+    'display_label=invoice-check · worker' \
+    'herdr_workspace_label=foreign flat label' \
+    'herdr_tab_label=invoice-check · worker' \
+    'herdr_pane_label=invoice-check · worker' >> "$meta"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"w1","label":"foreign flat label"}]}}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"invoice-check · worker"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"w1","pane_id":"w1:p1","tab_id":"w1:t1"}]}}'
+  response "$dir" 4 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","label":"invoice-check · worker"}}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_list_live fmtest 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "arbitrary flat recorded workspace label was accepted"
+  [ -z "$out" ] || fail "arbitrary flat workspace refusal leaked output: $out"
+  pass "Herdr list_live: projected exception does not widen flat workspace labels"
+}
+
 # A positively absent metadata-owned workspace creates a new workspace from
 # the response without touching any old object.
 test_missing_workspace_recreates_without_mutation() {
@@ -566,6 +616,92 @@ test_projection_live_binding_refuses_pane_label_change() {
   pass "Herdr projection binding: exact pane get enforces the readable pane label"
 }
 
+# The reserved firstmate subject formats only the native primary role.
+test_firstmate_primary_formatter_boundary() {
+  local out role
+  out=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label firstmate primary' "$ROOT") \
+    || fail "firstmate primary formatter refused"
+  [ "$out" = 'firstmate · primary' ] || fail "firstmate primary label mismatch: $out"
+  for role in worker scout 'second mate'; do
+    if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_format_label firstmate "$1"' \
+      "$ROOT" "$role" >/dev/null 2>&1; then
+      fail "firstmate subject was accepted for role '$role'"
+    fi
+  done
+  pass "Herdr labels: firstmate subject is reserved to the primary role"
+}
+
+# Herdr's honest native-session alias is one optional exact display field.
+test_session_display_alias_metadata() {
+  local home meta parent out
+  home="$TMP_ROOT/session-alias/home"; mkdir -p "$home/state"
+  meta="$home/state/alias.meta"
+  metadata "$meta" ship /srv/payments w1 w1:t1 w1:p1
+  printf 'herdr_session_display_label=Shared Herdr session\n' >> "$meta"
+  FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_metadata_validate_record "$1"' \
+    "$ROOT" "$meta" || fail "exact session display alias was refused"
+  out=$(FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_session_display_label' "$ROOT")
+  [ "$out" = 'Shared Herdr session' ] || fail "session display helper mismatch: $out"
+
+  cp "$meta" "$home/state/foreign.meta"
+  perl -pi -e 's/Shared Herdr session/Payments session/' "$home/state/foreign.meta"
+  if FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_metadata_validate_record "$1"' \
+    "$ROOT" "$home/state/foreign.meta" >/dev/null 2>&1; then
+    fail "foreign project-specific session alias was accepted"
+  fi
+  parent="$home/state/.herdr-parent.meta"
+  FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$parent" "$home" || fail "second-mate parent metadata publication failed"
+  [ "$(grep '^herdr_session_display_label=' "$parent")" = \
+    'herdr_session_display_label=Shared Herdr session' ] \
+    || fail "second-mate parent metadata omitted the honest session alias"
+  [ ! -e "$home/state/.herdr-parent.meta.tmp.$$" ] || fail "parent metadata left a predictable temporary file"
+  pass "Herdr metadata: native-session alias is exact, display-only, and parent-published"
+}
+
+# The private metadata-free fallback scans every running session and never
+# chooses the first same-labeled tab.
+test_bare_selector_global_uniqueness() {
+  local dir home log fake out status
+  dir="$TMP_ROOT/bare-duplicate"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"sessions":[{"name":"alpha","running":true},{"name":"bravo","running":true}]}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"wa","tab_id":"wa:ta","label":"same"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"wa","tab_id":"wa:ta","pane_id":"wa:pa"}]}}'
+  response "$dir" 4 '{"result":{"tabs":[{"workspace_id":"wb","tab_id":"wb:tb","label":"same"}]}}'
+  response "$dir" 5 '{"result":{"panes":[{"workspace_id":"wb","tab_id":"wb:tb","pane_id":"wb:pb"}]}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_resolve_bare_selector same 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "cross-session duplicate bare selector chose one target"
+  assert_contains "$out" 'not globally unique' "cross-session duplicate refusal was not clear"
+
+  dir="$TMP_ROOT/bare-one"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"sessions":[{"name":"alpha","running":true},{"name":"bravo","running":true}]}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"wa","tab_id":"wa:ta","label":"one"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"wa","tab_id":"wa:ta","pane_id":"wa:pa"}]}}'
+  response "$dir" 4 '{"result":{"tabs":[{"workspace_id":"wb","tab_id":"wb:tb","label":"other"}]}}'
+  out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_resolve_bare_selector one) \
+    || fail "one globally exact bare selector refused"
+  [ "$out" = 'alpha:wa:pa' ] || fail "one exact bare selector returned '$out'"
+
+  dir="$TMP_ROOT/bare-multipane"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"sessions":[{"name":"alpha","running":true}]}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"wa","tab_id":"wa:ta","label":"many"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"wa","tab_id":"wa:ta","pane_id":"wa:p1"},{"workspace_id":"wa","tab_id":"wa:ta","pane_id":"wa:p2"}]}}'
+  if run_adapter "$home" "$fake" "$log" fm_backend_herdr_resolve_bare_selector many >/dev/null 2>&1; then
+    fail "multi-pane matching tab was accepted"
+  fi
+  pass "Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse"
+}
+
+test_firstmate_primary_formatter_boundary
+test_session_display_alias_metadata
+test_bare_selector_global_uniqueness
 test_projection_journal_versions_and_readable_binding
 test_projection_create_renames_and_verifies_both_labels
 test_projection_live_binding_refuses_pane_label_change
@@ -574,6 +710,8 @@ test_malformed_metadata_refuses
 test_exact_workspace_discovery_refuses_semantic_duplicate
 test_marked_workspace_collision_is_untouched
 test_prefix_free_list_live_uses_only_exact_local_metadata
+test_projected_list_live_uses_recorded_workspace_label
+test_flat_list_live_refuses_arbitrary_recorded_workspace_label
 test_missing_workspace_recreates_without_mutation
 test_missing_tab_reuses_workspace_and_creates_task
 test_missing_pane_reuses_workspace_without_close
