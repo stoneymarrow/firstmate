@@ -436,6 +436,139 @@ test_new_object_label_failure_rolls_back_only_response_pane() {
   pass "Herdr rollback: label failure touches only the response-derived pane"
 }
 
+# Version 1 and legacy version 2 stay byte-compatible; fresh exact bindings
+# use version 3 with one task-kind field and the adapter-derived label.
+test_projection_journal_versions_and_readable_binding() {
+  local dir home state journal token label before after out
+  dir="$TMP_ROOT/journal-versions"; home="$dir/home"; state="$dir/state"
+  mkdir -p "$home" "$state"
+  token=AbCdEfGhIjKlMnOpQrStUv
+  journal="$state/invoice-check.herdr-presentation"
+  {
+    printf 'version=2\n'
+    printf 'task_id=invoice-check\n'
+    printf 'projection_id=%s\n' "$token"
+    printf 'home=%s\n' "$home"
+    printf 'session=fmtest\nworkspace_id=w2\ntab_id=w2:t2\npane_id=w2:p2\n'
+    printf 'parent_workspace_id=w1\nparent_label=payments · primary\n'
+    printf 'workspace_label=└ invoice-check · p:%s\n' "$token"
+    printf 'task_label=fm-invoice-check\n'
+  } > "$journal"
+  before=$(shasum -a 256 "$journal")
+  out=$(FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_projection_journal_snapshot "$1" invoice-check || exit 1
+    printf "%s|%s|%s|%s" "$FM_BACKEND_HERDR_JOURNAL_FORMAT_VERSION" \
+      "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_TASK_KIND" \
+      "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+  ' "$ROOT" "$journal") || fail "legacy version 2 journal was not readable"
+  [ "$out" = '2|2||fm-invoice-check' ] || fail "legacy version 2 snapshot changed: $out"
+  after=$(shasum -a 256 "$journal")
+  [ "$before" = "$after" ] || fail "reading legacy version 2 rewrote it"
+
+  rm -f "$journal"
+  out=$(FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" invoice-check) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label invoice-check "$token")
+    home=$(fm_backend_herdr_projection_home_identity "$2") || exit 1
+    task_label=$(FM_HOME="$2" fm_backend_herdr_task_label invoice-check ship) || exit 1
+    fm_backend_herdr_projection_journal_bind "$1/invoice-check.herdr-presentation" \
+      invoice-check ship "$home" fmtest w2 w2:t2 w2:p2 w1 \
+      "payments · primary" "$label" "$task_label" || exit 1
+    fm_backend_herdr_projection_journal_snapshot "$1/invoice-check.herdr-presentation" invoice-check || exit 1
+    printf "%s|%s|%s|%s" "$FM_BACKEND_HERDR_JOURNAL_FORMAT_VERSION" \
+      "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_TASK_KIND" \
+      "$FM_BACKEND_HERDR_JOURNAL_TASK_LABEL"
+  ' "$ROOT" "$state" "$home") || fail "fresh version 3 binding failed"
+  [ "$out" = '3|2|ship|invoice-check · worker' ] || fail "fresh version 3 snapshot mismatch: $out"
+  [ "$(wc -l < "$journal" | tr -d '[:space:]')" = 13 ] || fail "version 3 journal did not add exactly one field"
+  [ "$(grep -c '^task_kind=ship$' "$journal")" = 1 ] || fail "version 3 journal task kind was missing or duplicated"
+  label=$(grep '^workspace_label=' "$journal" | cut -d= -f2-)
+  [ -n "$label" ] || fail "version 3 workspace label was missing"
+
+  cp "$journal" "$dir/bad-kind"
+  perl -pi -e 's/^task_kind=ship$/task_kind=secondmate/' "$dir/bad-kind"
+  if FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" invoice-check' \
+    "$ROOT" "$dir/bad-kind" >/dev/null 2>&1; then
+    fail "version 3 accepted a non ship/scout task kind"
+  fi
+  cp "$journal" "$dir/bad-label"
+  perl -pi -e 's/^task_label=.*$/task_label=fm-invoice-check/' "$dir/bad-label"
+  if FM_HOME="$home" bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" invoice-check' \
+    "$ROOT" "$dir/bad-label" >/dev/null 2>&1; then
+    fail "version 3 accepted a non-derived task label"
+  fi
+  pass "Herdr projection journal: v1/v2 compatibility and strict readable v3 binding"
+}
+
+# Projection create pins both response-derived labels, then verifies the one
+# exact readable tab and pane without selecting either by label.
+test_projection_create_renames_and_verifies_both_labels() {
+  local dir home log fake out calls
+  dir="$TMP_ROOT/projection-readable-create"; home="$dir/home"; mkdir -p "$home/state"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"},"root_pane":{"pane_id":"w9:p1"}}}'
+  response "$dir" 2 '{"result":{"tab":{"tab_id":"w9:t2"},"root_pane":{"pane_id":"w9:p2"}}}'
+  response "$dir" 3 '{"result":{"tab":{"workspace_id":"w9","tab_id":"w9:t2","label":"invoice-check · worker"}}}'
+  response "$dir" 4 '{"result":{"pane":{"workspace_id":"w9","tab_id":"w9:t2","pane_id":"w9:p2","label":"invoice-check · worker"}}}'
+  response "$dir" 5 '{"result":{"tabs":[{"workspace_id":"w9","tab_id":"w9:t2","label":"invoice-check · worker"}]}}'
+  response "$dir" 6 '{"result":{"panes":[{"workspace_id":"w9","tab_id":"w9:t2","pane_id":"w9:p2"}]}}'
+  response "$dir" 7 '{"result":{"pane":{"workspace_id":"w9","tab_id":"w9:t2","pane_id":"w9:p2","label":"invoice-check · worker"}}}'
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$dir/responses" \
+    HERDR_SESSION=fmtest bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_version_check() { return 0; }
+      fm_backend_herdr_server_ensure() { return 0; }
+      fm_backend_herdr_projection_focus_snapshot() { printf "captain-ws\tcaptain-tab"; }
+      fm_backend_herdr_projection_focus_restore() { return 0; }
+      fm_backend_herdr_workspace_prune_seeded_default_tab() { return 0; }
+      fm_backend_herdr_projection_create_task /srv/payments "└ invoice-check · p:AbCdEfGhIjKlMnOpQrStUv" "invoice-check · worker" || exit 1
+      printf "%s|%s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ' "$ROOT") || fail "readable projection create failed"
+  [ "$out" = 'w9:t2|w9:p2' ] || fail "readable projection create returned wrong ids: $out"
+  calls=$(<"$log")
+  assert_contains "$calls" $'tab\037rename\037w9:t2\037invoice-check · worker' "projection did not rename its response-derived tab"
+  assert_contains "$calls" $'pane\037rename\037w9:p2\037invoice-check · worker' "projection did not rename its response-derived pane"
+  assert_contains "$calls" $'pane\037get\037w9:p2' "projection did not verify its exact pane label"
+  pass "Herdr projection create: response-derived tab and pane use the readable label"
+}
+
+# Live binding verification reads the exact pane and refuses a changed pane
+# label even when workspace, tab, and pane-list identities still match.
+test_projection_live_binding_refuses_pane_label_change() {
+  local mode dir home log fake status
+  for mode in exact renamed; do
+    dir="$TMP_ROOT/projection-pane-$mode"; home="$dir/home"; mkdir -p "$home/state"
+    log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+    response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · primary"},{"workspace_id":"w2","label":"└ invoice-check · p:AbCdEfGhIjKlMnOpQrStUv"}]}}'
+    response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"w2","tab_id":"w2:t2","label":"invoice-check · worker"}]}}'
+    response "$dir" 3 '{"result":{"panes":[{"workspace_id":"w2","tab_id":"w2:t2","pane_id":"w2:p2"}]}}'
+    if [ "$mode" = exact ]; then
+      response "$dir" 4 '{"result":{"pane":{"workspace_id":"w2","tab_id":"w2:t2","pane_id":"w2:p2","label":"invoice-check · worker"}}}'
+    else
+      response "$dir" 4 '{"result":{"pane":{"workspace_id":"w2","tab_id":"w2:t2","pane_id":"w2:p2","label":"renamed"}}}'
+    fi
+    if run_adapter "$home" "$fake" "$log" fm_backend_herdr_projection_live_binding_matches \
+      fmtest AbCdEfGhIjKlMnOpQrStUv w2 w2:t2 w2:p2 w1 \
+      'payments · primary' '└ invoice-check · p:AbCdEfGhIjKlMnOpQrStUv' \
+      'invoice-check · worker' >/dev/null 2>&1; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "$mode" = exact ]; then
+      [ "$status" -eq 0 ] || fail "exact pane label was refused"
+    else
+      [ "$status" -ne 0 ] || fail "changed pane label was accepted"
+    fi
+  done
+  pass "Herdr projection binding: exact pane get enforces the readable pane label"
+}
+
+test_projection_journal_versions_and_readable_binding
+test_projection_create_renames_and_verifies_both_labels
+test_projection_live_binding_refuses_pane_label_change
 test_strict_adapter_owned_labels
 test_malformed_metadata_refuses
 test_exact_workspace_discovery_refuses_semantic_duplicate
