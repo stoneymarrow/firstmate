@@ -120,6 +120,41 @@ test_prior_project_label_requires_exact_metadata() {
   pass "Herdr discovery: prior project label requires exact metadata"
 }
 
+# The old primary-home `firstmate` project label may migrate only when the
+# complete ambient native tuple proves a different workspace in the same
+# physical named session.
+test_legacy_firstmate_workspace_requires_proved_native_separation() {
+  local dir home meta log fake socket out calls
+  dir="$TMP_ROOT/legacy-firstmate-separated"; home="$dir/home"
+  mkdir -p "$home/state" "$dir/session"
+  meta="$home/state/invoice-check.meta"
+  metadata "$meta" ship /srv/firstmate old old:t1 old:p1
+  printf '%s\n' \
+    'herdr_workspace_label=firstmate' \
+    'herdr_tab_label=invoice-check · worker' \
+    'herdr_pane_label=invoice-check · worker' >> "$meta"
+  socket="$dir/session/herdr.sock"; : > "$socket"
+  log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"native","label":"firstmate · primary"},{"workspace_id":"old","label":"firstmate"}]}}'
+  response "$dir" 2 '{"result":{"tabs":[{"workspace_id":"old","tab_id":"old:t1","label":"invoice-check · worker"}]}}'
+  response "$dir" 3 '{"result":{"panes":[{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1"}]}}'
+  response "$dir" 4 '{"result":{"pane":{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1","label":"invoice-check · worker"}}}'
+  response "$dir" 5 "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$socket\"}]}"
+  response "$dir" 6 '{"result":{"workspace":{"workspace_id":"old","label":"firstmate · project"}}}'
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" \
+    FM_HERDR_RESPONSES="$dir/responses" HERDR_ENV=1 HERDR_SOCKET_PATH="$socket" \
+    HERDR_WORKSPACE_ID=native HERDR_TAB_ID=native:t1 HERDR_PANE_ID=native:p1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_workspace_ensure fmtest /srv/firstmate "$1"' \
+      "$ROOT" "$meta") || fail "proved non-native legacy project workspace could not migrate"
+  [ "$out" = old ] || fail "proved non-native legacy migration returned '$out'"
+  calls=$(<"$log")
+  assert_contains "$calls" $'workspace\037rename\037old\037firstmate · project' \
+    "proved non-native legacy workspace was not migrated"
+  assert_not_contains "$calls" $'workspace\037rename\037native' \
+    "proved non-native migration touched the native workspace"
+  pass "Herdr discovery: legacy firstmate workspace migrates only after proved native separation"
+}
+
 # A primary workspace is adopted only through its complete metadata tuple;
 # a second semantic label candidate makes discovery ambiguous.
 test_exact_workspace_discovery_refuses_semantic_duplicate() {
@@ -866,6 +901,7 @@ test_projection_live_binding_refuses_pane_label_change
 test_strict_adapter_owned_labels
 test_malformed_metadata_refuses
 test_prior_project_label_requires_exact_metadata
+test_legacy_firstmate_workspace_requires_proved_native_separation
 test_exact_workspace_discovery_refuses_semantic_duplicate
 test_marked_workspace_collision_is_untouched
 test_prefix_free_list_live_uses_only_exact_local_metadata

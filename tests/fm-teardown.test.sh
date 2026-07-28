@@ -1248,7 +1248,12 @@ test_herdr_teardown_clears_escalation_marker() {
   write_meta "$case_dir" local-only ship
   sed -i.bak 's/^window=.*/window=default:wG:pQ/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
-  printf '%s\n' 'backend=herdr' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=default' \
+    'herdr_workspace_id=wG' \
+    'herdr_tab_id=wG:tQ' \
+    'herdr_pane_id=wG:pQ' >> "$case_dir/state/task-x1.meta"
   cat > "$case_dir/fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -1265,6 +1270,7 @@ SH
 
 configure_herdr_projection_teardown_case() {  # <case-dir>
   local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  : > "$case_dir/fmtest.sock"
   sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.meta.bak"
   printf '%s\n' \
@@ -1302,7 +1308,8 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"server":{"running":true}}'
     ;;
   "session list")
-    printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}'
+    printf '{"sessions":[{"name":"fmtest","running":true,"socket_path":"%s"}]}\n' \
+      "${FM_FAKE_HERDR_SOCKET:?}"
     ;;
   "pane close")
     if [ "${FM_FAKE_HERDR_CLOSE_FAIL:-0}" = 1 ]; then
@@ -1334,13 +1341,15 @@ SH
 }
 
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed restored
+  local case_dir log closed restored socket
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"
+  socket="$(cd "$case_dir" && pwd -P)/fmtest.sock"; : > "$log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_SOCKET="$socket" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
@@ -1353,13 +1362,15 @@ test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
-  local case_dir log closed restored
+  local case_dir log closed restored socket
   case_dir=$(make_case herdr-projection-unconfirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
-  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"
+  socket="$(cd "$case_dir" && pwd -P)/fmtest.sock"; : > "$log"
 
-  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_CLOSE_FAIL=1 \
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_HERDR_SOCKET="$socket" FM_FAKE_HERDR_CLOSE_FAIL=1 \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-unconfirmed-close: teardown should preserve best-effort endpoint semantics"
   [ -e "$case_dir/state/task-x1.herdr-presentation" ] \

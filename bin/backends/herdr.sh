@@ -3,9 +3,9 @@
 #
 # Design: data/fm-backend-design-d7/herdr-addendum.md ("Interface mapping",
 # decisions D1-D6) and the empirical verification recorded in
-# data/fm-backend-design-d7/herdr-verification-p2.md (real herdr v0.7.1,
-# protocol 14, macOS aarch64), refined by docs/herdr-backend.md's
-# "workspace-per-home" pass (AGENTS.md task herdr-sm-spaces-k4). Herdr is a
+# data/fm-backend-design-d7/herdr-verification-p2.md, now checked through
+# Herdr 0.7.5 protocol 16 on macOS aarch64 and refined by
+# docs/herdr-backend.md's project-owned primary-workspace contract. Herdr is a
 # session provider ONLY (D3): the worktree provider stays treehouse, exactly
 # like tmux. Sourced only through bin/fm-backend.sh's fm_backend_source in
 # normal operation; the unit tests source it directly, so the FM_HOME fallback
@@ -24,8 +24,8 @@
 # A version 2 or 3 journal can participate in replacing only its exact same-identity
 # endpoint after metadata, home, session, workspace, tab, pane, parent, shape,
 # focus, and agent-absence checks all agree under the session lock.
-# Every ambiguous recovered launch uses the default flat home workspace when
-# duplicate-agent risk is independently absent.
+# Every ambiguous recovered launch uses the default flat project or marked-home
+# workspace when duplicate-agent risk is independently absent.
 # Target resolution stays parallel to the tmux adapter in both layouts.
 # Projected create, move, and cleanup operations capture the named session's
 # exact active workspace and tab. Herdr 0.7.4's last-pane close can focus an
@@ -55,9 +55,7 @@
 # global before sourcing fm-backend.sh (which sources this file), so this
 # never overrides a real invocation. It exists only so this file's own unit
 # tests, which source it directly without that preamble, resolve to a sane
-# default (the firstmate repo root - never a secondmate home, so
-# fm_backend_herdr_workspace_label falls through to "firstmate" exactly like
-# pre-P3 behavior when a test does not care about home-specific labeling).
+# default (the Firstmate repo root, never a second-mate home).
 FM_BACKEND_HERDR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_HERDR_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -164,6 +162,40 @@ fm_backend_herdr_format_label() {  # <concise-subject> <role>
   printf '%s%s%s' "$subject" "$FM_BACKEND_HERDR_LABEL_SEPARATOR" "$role"
 }
 
+# Preserve an already-safe human subject byte for byte. Reserved, prefixed,
+# long, or otherwise formatter-unsafe routing names receive a display-only
+# x-<readable-stem>-<stable-hash> subject. The role and complete raw routing
+# name feed the hash, so escaping or shortening does not create a deterministic
+# collision with another raw name. No caller may use this subject as an id.
+fm_backend_herdr_display_subject() {  # <raw-routing-subject> <role>
+  local raw=${1:-} role=${2:-} hash stem max_stem subject
+  if fm_backend_herdr_format_label "$raw" "$role" >/dev/null 2>&1; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  case "$role" in project|worker|scout) ;; *) return 1 ;; esac
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s\0%s' "$role" "$raw" | shasum -a 256 2>/dev/null | awk '{print substr($1,1,16)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s\0%s' "$role" "$raw" | sha256sum 2>/dev/null | awk '{print substr($1,1,16)}')
+  else
+    return 1
+  fi
+  case "$hash" in ????????????????) ;; *) return 1 ;; esac
+  stem=$(printf '%s' "$raw" | LC_ALL=C sed -E \
+    -e 's/[^A-Za-z0-9._-]+/-/g' \
+    -e 's/^[^A-Za-z0-9]+//' \
+    -e 's/[^A-Za-z0-9]+$//')
+  [ -n "$stem" ] || stem=label
+  max_stem=$((FM_BACKEND_HERDR_LABEL_MAX_SUBJECT - 19))
+  stem=$(printf '%s' "$stem" | LC_ALL=C cut -c "1-$max_stem" \
+    | LC_ALL=C sed -E -e 's/[^A-Za-z0-9]+$//')
+  [ -n "$stem" ] || stem=label
+  subject="x-$stem-$hash"
+  fm_backend_herdr_format_label "$subject" "$role" >/dev/null 2>&1 || return 1
+  printf '%s' "$subject"
+}
+
 fm_backend_herdr_secondmate_subject() {
   local marker="$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" subject extra
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
@@ -184,6 +216,7 @@ fm_backend_herdr_workspace_label() {  # <spawned-project-or-home>
     return
   fi
   subject=${project%/}; subject=${subject##*/}
+  subject=$(fm_backend_herdr_display_subject "$subject" project) || return 1
   fm_backend_herdr_format_label "$subject" project
 }
 
@@ -196,6 +229,7 @@ fm_backend_herdr_workspace_prior_primary_label() {  # <spawned-project>
   [ ! -e "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] \
     && [ ! -L "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] || return 1
   subject=${project%/}; subject=${subject##*/}
+  subject=$(fm_backend_herdr_display_subject "$subject" project) || return 1
   project_label=$(fm_backend_herdr_format_label "$subject" project) || return 1
   printf '%s%sprimary' "${project_label%"${FM_BACKEND_HERDR_LABEL_SEPARATOR}"project}" \
     "$FM_BACKEND_HERDR_LABEL_SEPARATOR"
@@ -204,18 +238,22 @@ fm_backend_herdr_workspace_prior_primary_label() {  # <spawned-project>
 fm_backend_herdr_task_label() {  # <task-id> <task-kind>
   local subject=$1 kind=$2 role
   role=$(fm_backend_herdr_role_for_kind "$kind") || return 1
-  [ "$kind" != secondmate ] || subject=$(fm_backend_herdr_secondmate_subject) || {
-    echo "error: invalid stable second-mate marker for herdr task label" >&2
-    return 1
-  }
+  if [ "$kind" = secondmate ]; then
+    subject=$(fm_backend_herdr_secondmate_subject) || {
+      echo "error: invalid stable second-mate marker for herdr task label" >&2
+      return 1
+    }
+  else
+    subject=$(fm_backend_herdr_display_subject "$subject" "$role") || return 1
+  fi
   fm_backend_herdr_format_label "$subject" "$role"
 }
 
 # fm_backend_herdr_cli: run `herdr <args...>` scoped to <session>, setting
 # BOTH the HERDR_SESSION env var AND appending a trailing `--session <name>`
 # CLI flag. Verified empirically (docs/herdr-backend.md "Session targeting: the
-# --session flag, not HERDR_SESSION alone"): on the installed herdr 0.7.1
-# client, the HERDR_SESSION env var is NOT reliably honored by CLI subcommands
+# --session flag, not HERDR_SESSION alone") through Herdr 0.7.5: the
+# HERDR_SESSION env var is not reliable routing authority for CLI subcommands
 # once ANY other herdr server is already bound on the machine - queries
 # silently fall back to whatever server IS running (the wrong one) instead of
 # routing to the requested session or refusing. The `--session <name>` global
@@ -240,8 +278,9 @@ fm_backend_herdr_tool_check() {
 }
 
 # fm_backend_herdr_version_check: refuse loudly on a missing/incompatible
-# herdr client. Verified locally: v0.7.1, protocol 14 (herdr status --json's
-# .client.protocol; client info is session-independent, unlike .server).
+# Herdr client. Current proof uses 0.7.5 protocol 16; protocol 14 remains the
+# compatibility floor from the earlier client matrix. Client info is
+# session-independent, unlike server state.
 fm_backend_herdr_version_check() {
   fm_backend_herdr_tool_check || return 1
   local status protocol version
@@ -667,6 +706,22 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
   fi
   fm_backend_herdr_presentation_lock_namespace_valid "$dir" || return 1
   printf '%s/order-%s.lock' "$dir" "$key"
+}
+
+# Return the native primary workspace id only when the complete ambient Herdr
+# tuple and socket prove that it belongs to this exact named session. A bare
+# workspace id is not enough because Herdr ids may repeat across sessions.
+fm_backend_herdr_native_workspace_for_session() {  # <session>
+  local session=$1 value ambient_socket session_socket
+  [ "${HERDR_ENV:-}" = 1 ] || return 1
+  for value in "${HERDR_WORKSPACE_ID:-}" "${HERDR_TAB_ID:-}" "${HERDR_PANE_ID:-}"; do
+    case "$value" in ''|*[[:space:][:cntrl:]]*) return 1 ;; esac
+  done
+  case "${HERDR_SOCKET_PATH:-}" in /*) ;; *) return 1 ;; esac
+  ambient_socket=$(fm_backend_herdr_canonical_socket_path "$HERDR_SOCKET_PATH") || return 1
+  session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
+  [ "$ambient_socket" = "$session_socket" ] || return 1
+  printf '%s' "$HERDR_WORKSPACE_ID"
 }
 
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
@@ -1318,7 +1373,7 @@ fm_backend_herdr_workspace_find() {  # <session> <project-or-home> [task-meta] [
   local exact_parent=${5:-} exact_parent_prior=${6:-} state="$FM_HOME/state" parent_meta
   local meta backend kind record_project record_identity record_home home_identity id subject
   local desired prior="" legacy readable task_legacy target_identity list wsid current recorded
-  local exact_wsid="" exact_label="" foreign_wsids="" paths="" marked=0 count
+  local exact_wsid="" exact_label="" foreign_wsids="" paths="" marked=0 count native_workspace
   FM_BACKEND_HERDR_WS_FOUND_ID=""
   FM_BACKEND_HERDR_WS_CURRENT_LABEL=""
   fm_backend_herdr_metadata_validate_home "$state" || return 1
@@ -1435,6 +1490,16 @@ fm_backend_herdr_workspace_find() {  # <session> <project-or-home> [task-meta] [
     else
       [ "$current" = "$desired" ] || [ "$current" = "$legacy" ] \
         || { [ -n "$prior" ] && [ "$current" = "$prior" ]; } || return 1
+    fi
+    if [ "$marked" -eq 0 ] && [ "$legacy" = firstmate ] && [ "$current" = firstmate ]; then
+      native_workspace=$(fm_backend_herdr_native_workspace_for_session "$session" 2>/dev/null) || {
+        echo "error: legacy primary-home herdr workspace could be the native primary; exact native session identity is required" >&2
+        return 1
+      }
+      [ "$wsid" != "$native_workspace" ] || {
+        echo "error: legacy task metadata names the native primary herdr workspace; refusing project adoption" >&2
+        return 1
+      }
     fi
     case "$meta" in
       */.herdr-parent.meta) id=$(fm_backend_herdr_meta_field_exact "$meta" task_id 2>/dev/null) || return 1 ;;
@@ -1644,9 +1709,9 @@ fm_backend_herdr_container_ensure() {  # <project-or-home> [task-meta] [excluded
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
 # dead|no-agent|live|unknown, purely from the JSON body of two read-only
 # calls - never from process exit status, since a business-logic "not found"
-# response is a normal, expected outcome here, not a call failure (real herdr
-# 0.7.1 exits 1 for it; the canned-response test fakes exit 0; parsing only
-# the JSON keeps this function correct against either).
+# response is a normal, expected outcome here, not a call failure (the current
+# Herdr compatibility matrix exits 1 for it; the canned-response test fakes
+# exit 0, so parsing only the JSON keeps this function correct against either).
 #
 #   dead     - `pane get` responds with error code pane_not_found: the pane
 #              itself is gone (closed, or its process died and herdr already
@@ -1674,8 +1739,8 @@ fm_backend_herdr_container_ensure() {  # <project-or-home> [task-meta] [excluded
 #              backstop the husk check depends on.
 fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
   local session=$1 pane_id=$2 out code pid status
-  # 2>&1, not 2>/dev/null: verified empirically that real herdr 0.7.1 writes
-  # an error response's JSON body to STDERR (success bodies go to stdout), so
+  # 2>&1, not 2>/dev/null: verified through the current Herdr compatibility
+  # matrix that error JSON goes to stderr while success JSON goes to stdout, so
   # discarding stderr here would blind this function to exactly the
   # error.code values (pane_not_found, agent_not_found) it exists to read -
   # every OTHER call site in this file discards stderr safely only because
@@ -3098,7 +3163,7 @@ fm_backend_herdr_send_key() {  # <target> <key>
 # fm-peek.sh's/fm-watch.sh's `tmux capture-pane -p -t T -S -N`. --source recent
 # is the closest herdr analogue to tmux's scrollback-bounded capture.
 #
-# Verified CLI quirk (herdr-verification-p2.md "pane read --lines bug", v0.7.1):
+# Verified CLI quirk through Herdr 0.7.5 (herdr-verification-p2.md "pane read --lines bug"):
 # `pane read --source recent --lines N` returns COMPLETELY EMPTY output when N
 # is smaller than the pane's current viewport height (observed threshold ~23
 # rows for a default-sized pane), instead of clamping to the last N lines - it
@@ -3150,8 +3215,8 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              footer help line ("Enter:send │ … │ …") uses │ only as an
 #              INTERIOR separator and does not start with one, so it never
 #              matches either.
-#   bare     - an UNBORDERED composer (verified real claude 2.x and codex
-#              0.142.x, both under herdr 0.7.1, docs/herdr-backend.md
+#   bare     - an UNBORDERED composer (verified real Claude 2.x and Codex
+#              0.142.x in the current Herdr matrix, docs/herdr-backend.md
 #              "Incident (2026-07-07)"): the row's TRIMMED content starts with
 #              one of the verified agent-specific prompt glyphs but carries no
 #              closing border at all - claude's own live input row is a bare

@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# tests/fm-backend-herdr-workspace-per-home-e2e.test.sh - mandatory ISOLATED
-# end-to-end real-herdr test for the P3 "workspace-per-home" pass (AGENTS.md
-# task herdr-sm-spaces-k4). Drives the REAL bin/fm-spawn.sh and
-# bin/fm-teardown.sh (not just adapter primitives), because the requirement
-# under test - a --secondmate spawn's tab landing in the secondmate's OWN
-# herdr workspace, and a crewmate spawned FROM a secondmate home landing there
-# too - only exists at fm-spawn.sh's own home-shadowing logic (the herdr case
-# arm) and at fm_backend_herdr_workspace_label's FM_HOME read; neither is
-# exercised by the adapter-primitive smoke test.
+# Mandatory isolated end-to-end real-Herdr proof for project-owned primary
+# workspaces and stable marked second-mate-home workspaces. It drives the real
+# bin/fm-spawn.sh and bin/fm-teardown.sh because primary project separation and
+# a second mate's shared home workspace depend on spawn's exact home override,
+# metadata publication, and the adapter's fresh FM_HOME read.
 #
 # Mirrors tests/fm-backend-autodetect-smoke.test.sh's isolated-session
 # convention: a private throwaway HERDR_SESSION (never the captain's
