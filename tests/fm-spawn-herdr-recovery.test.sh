@@ -463,6 +463,133 @@ JS
   pass "Herdr full spawn: native primary and Firstmate project remain distinct"
 }
 
+# Legacy primary-home evidence may name the old `firstmate` project workspace.
+# If that workspace is the native primary, or the ambient native tuple cannot
+# prove a distinct same-session workspace, the full spawn must preserve all
+# prior evidence and stop before any Herdr mutation, launch, or publication.
+test_real_spawn_refuses_legacy_native_workspace_adoption() {
+  local mode dir home project worktree id fake state log socket meta meta_before state_before
+  local out status calls
+  for mode in shared-native insufficient-native; do
+    dir="$TMP_ROOT/full-legacy-native-$mode"
+    home="$dir/home"; project="$dir/firstmate"; worktree="$dir/worktree"
+    id="legacy-native-${mode}-$$"
+    make_project_and_worktree "$project" "$worktree" \
+      || fail "$mode could not create the legacy-native project fixture"
+    make_worker_home "$home" "$id"
+    fake=$(make_stateful_herdr "$dir")
+    state="$dir/state.json"; log="$dir/herdr.log"; socket=$(jq -r '.socket' "$state")
+    # shellcheck disable=SC2016  # jq variables, not shell expansion
+    state_update "$state" --arg root "$ROOT" --arg project "$project" \
+      --arg worktree "$worktree" --arg id "$id" '
+      .workspaces = [{workspace_id:"native",label:"firstmate",focused:true,active_tab_id:"native:t0"}]
+      | .tabs = [
+          {workspace_id:"native",tab_id:"native:t0",label:"1",focused:true},
+          {workspace_id:"native",tab_id:"native:t1",label:($id + " · worker"),focused:false}
+        ]
+      | .panes = [
+          {workspace_id:"native",tab_id:"native:t0",pane_id:"native:p0",label:"",cwd:$root,foreground_cwd:$root},
+          {workspace_id:"native",tab_id:"native:t1",pane_id:"native:p1",label:($id + " · worker"),cwd:$project,foreground_cwd:$worktree}
+        ]
+    '
+    meta="$home/state/$id.meta"
+    write_full_projected_meta "$meta" "$id" "$project" "$worktree" \
+      native native:t1 native:p1 firstmate "$id · worker"
+    meta_before=$(cksum < "$meta")
+    state_before=$(jq -cS '{workspaces,tabs,panes,agents,pending}' "$state")
+    if [ "$mode" = shared-native ]; then
+      out=$(
+        HERDR_ENV=1 HERDR_SOCKET_PATH="$socket" HERDR_WORKSPACE_ID=native \
+          HERDR_TAB_ID=native:t0 HERDR_PANE_ID=native:p0 \
+          run_real_worker_spawn "$id" "$home" "$project" "$worktree" \
+            "$fake" "$state" "$log" 2>&1
+      ); status=$?
+    else
+      out=$(
+        unset HERDR_ENV HERDR_SOCKET_PATH HERDR_WORKSPACE_ID HERDR_TAB_ID HERDR_PANE_ID
+        run_real_worker_spawn "$id" "$home" "$project" "$worktree" \
+          "$fake" "$state" "$log" 2>&1
+      ); status=$?
+    fi
+    [ "$status" -ne 0 ] || fail "$mode legacy native candidate unexpectedly launched"
+    [ "$(cksum < "$meta")" = "$meta_before" ] \
+      || fail "$mode legacy native refusal changed prior task metadata"
+    [ "$(jq -cS '{workspaces,tabs,panes,agents,pending}' "$state")" = "$state_before" ] \
+      || fail "$mode legacy native refusal changed the shared native/task tuple"
+    calls=$(cat "$log")
+    assert_not_contains "$calls" $'workspace\037rename\037native' \
+      "$mode legacy native refusal renamed the native workspace"
+    assert_not_contains "$calls" $'workspace\037create' \
+      "$mode legacy native refusal created another workspace"
+    assert_not_contains "$calls" $'tab\037create' \
+      "$mode legacy native refusal created a task tab"
+    assert_not_contains "$calls" $'pane\037run' \
+      "$mode legacy native refusal entered a task pane"
+    assert_not_contains "$calls" $'pane\037send-text' \
+      "$mode legacy native refusal launched a worker"
+    assert_contains "$out" 'native primary' \
+      "$mode legacy native refusal did not explain the native-primary boundary"
+  done
+  pass "Herdr full spawn: legacy native/shared workspace evidence refuses without mutation or publication"
+}
+
+# Formatter restrictions apply only to display subjects. Full spawn keeps the
+# exact task-id route and canonical project path while publishing deterministic
+# readable labels for an fm-prefixed task id and a reserved project basename.
+test_real_spawn_escapes_formatter_unsafe_routes() {
+  local mode dir home project worktree id fake state log meta workspace tab pane
+  local expected_task expected_workspace
+  for mode in fm-task reserved-project; do
+    dir="$TMP_ROOT/full-safe-display-$mode"
+    home="$dir/home"
+    if [ "$mode" = fm-task ]; then
+      project="$dir/payments"
+      id=fm-invoice-check
+      expected_task='x-fm-invoice-check-978e10bbfe0c56c2 · worker'
+      expected_workspace='payments · project'
+    else
+      project="$dir/project"
+      id=invoice-check
+      expected_task='invoice-check · worker'
+      expected_workspace='x-project-47196a64d2ef15be · project'
+    fi
+    worktree="$dir/worktree"
+    make_project_and_worktree "$project" "$worktree" \
+      || fail "$mode could not create its formatter-safe display fixture"
+    project=$(cd "$project" && pwd -P)
+    worktree=$(cd "$worktree" && pwd -P)
+    make_worker_home "$home" "$id"
+    fake=$(make_stateful_herdr "$dir")
+    state="$dir/state.json"; log="$dir/herdr.log"
+    run_real_worker_spawn "$id" "$home" "$project" "$worktree" \
+      "$fake" "$state" "$log" > "$dir/out" 2> "$dir/err" \
+      || fail "$mode full spawn failed: $(cat "$dir/err")"
+    meta="$home/state/$id.meta"
+    [ -f "$meta" ] && [ ! -L "$meta" ] \
+      || fail "$mode did not publish metadata at the exact task-id route"
+    [ "$(grep '^project=' "$meta" | cut -d= -f2-)" = "$project" ] \
+      || fail "$mode changed the canonical project routing path"
+    [ "$(grep '^tasktmp=' "$meta" | cut -d= -f2-)" = "/tmp/fm-$id" ] \
+      || fail "$mode changed the task id while deriving task-local routing"
+    [ "$(grep '^display_label=' "$meta" | cut -d= -f2-)" = "$expected_task" ] \
+      && [ "$(grep '^herdr_tab_label=' "$meta" | cut -d= -f2-)" = "$expected_task" ] \
+      && [ "$(grep '^herdr_pane_label=' "$meta" | cut -d= -f2-)" = "$expected_task" ] \
+      || fail "$mode did not publish the expected safe readable task label"
+    [ "$(grep '^herdr_workspace_label=' "$meta" | cut -d= -f2-)" = "$expected_workspace" ] \
+      || fail "$mode did not publish the expected safe readable workspace label"
+    workspace=$(grep '^herdr_workspace_id=' "$meta" | cut -d= -f2-)
+    tab=$(grep '^herdr_tab_id=' "$meta" | cut -d= -f2-)
+    pane=$(grep '^herdr_pane_id=' "$meta" | cut -d= -f2-)
+    jq -e --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" \
+      --arg workspace_label "$expected_workspace" --arg task_label "$expected_task" '
+      ([.workspaces[] | select(.workspace_id == $workspace and .label == $workspace_label)] | length) == 1
+      and ([.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab and .label == $task_label)] | length) == 1
+      and ([.panes[] | select(.workspace_id == $workspace and .tab_id == $tab and .pane_id == $pane and .label == $task_label)] | length) == 1
+    ' "$state" >/dev/null || fail "$mode live tuple did not match its published safe display labels"
+  done
+  pass "Herdr full spawn: formatter-unsafe task and project routes remain exact with stable readable labels"
+}
+
 prepare_full_projection_case() {  # <dir> <version> <focus-child:0|1> <fail-reclaim-label:0|1>
   local dir=$1 version=$2 focus_child=$3 fail_label=$4 task_label parent_focus child_focus
   FULL_ID="projection-v${version}-${focus_child}-${fail_label}-$$"
@@ -1168,8 +1295,10 @@ test_flat_retry_evidence_classification() {
 # Keep the two evidence channels and publication order explicit in the real
 # spawn owner. These assertions supplement the behavioral adapter fixtures.
 test_spawn_wiring_keeps_recovery_channels_separate() {
-  local source guide verification
+  local source adapter e2e guide verification line
   source=$(cat "$ROOT/bin/fm-spawn.sh")
+  adapter=$(cat "$ROOT/bin/backends/herdr.sh")
+  e2e=$(cat "$ROOT/tests/fm-backend-herdr-workspace-per-home-e2e.test.sh")
   assert_contains "$source" 'herdr_projection_prepare_flat_evidence' \
     "spawn has no projected-versus-flat evidence classifier"
   assert_contains "$source" "\"\$HERDR_FLAT_EXCLUDED_META\"" \
@@ -1195,10 +1324,42 @@ test_spawn_wiring_keeps_recovery_channels_separate() {
   assert_not_contains "$verification" \
     'ok - Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures' \
     "runtime verification restored output that no current test emits"
-  pass "Herdr spawn recovery: flat, task, and parent evidence channels remain separate"
+  assert_not_contains "$verification" \
+    'ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift' \
+    "runtime verification quotes a concurrent-wave line no current suite emits"
+  assert_not_contains "$verification" 'Per-home and presentation topology' \
+    "runtime verification restored the stale one-workspace-per-primary-home topology"
+  assert_not_contains "$verification" 'primary and secondmate used distinct home workspaces' \
+    "runtime verification restored stale home-workspace evidence"
+  assert_not_contains "$source" 'workspace-per-HOME' \
+    "spawn restored the old workspace-per-HOME contract"
+  assert_not_contains "$source" 'workspace-per-home' \
+    "spawn restored the old workspace-per-home contract"
+  assert_not_contains "$adapter" 'workspace-per-home' \
+    "adapter restored the old workspace-per-home header"
+  assert_not_contains "$adapter" '0.7.1' \
+    "adapter restored stale Herdr 0.7.1 wording"
+  assert_not_contains "$e2e" 'workspace-per-home' \
+    "guarded topology suite restored the old workspace-per-home header"
+  assert_contains "$e2e" 'project-owned primary' \
+    "guarded topology suite does not name project-owned primary workspaces"
+  assert_contains "$e2e" 'stable marked second-mate-home workspaces' \
+    "guarded topology suite does not name stable marked second-mate-home behavior"
+  for line in \
+    'ok - fm_backend_herdr_workspace_ensure: the legacy captain workspace refuses and stays untouched' \
+    'ok - herdr teardown removes pane-owned escalation dedupe state' \
+    'ok - Herdr full spawn: legacy native/shared workspace evidence refuses without mutation or publication' \
+    'ok - Herdr full spawn: formatter-unsafe task and project routes remain exact with stable readable labels' \
+    'ok - Herdr display: exact no-detail state strips display fields to empty detail'; do
+    assert_contains "$verification" "$line" \
+      "runtime verification omits current safe-suite output: $line"
+  done
+  pass "Herdr spawn recovery: flat, task, parent, and maintained prose evidence stay current"
 }
 
 test_real_spawn_keeps_native_primary_and_firstmate_project_distinct
+test_real_spawn_refuses_legacy_native_workspace_adoption
+test_real_spawn_escapes_formatter_unsafe_routes
 test_real_spawn_projection_fallback_and_reclaim_refusals
 test_real_spawn_exact_journal_parent_refusals
 test_real_flat_publication_failure_cleanup_retry

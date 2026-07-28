@@ -143,7 +143,7 @@ Operational compromises:
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
 `tests/fm-spawn-herdr-recovery.test.sh` covers the real spawn entry point with a fake Herdr command for native/project separation, flat fallback, exact journal-parent refusal, ordinary flat-publication rollback and same-id retry, and second-mate publication failure or crash recovery.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
-`tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#per-home-and-presentation-topology) owns the active versioned evidence.
+`tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#project-and-marked-home-presentation-topology) owns the active versioned evidence.
 
 ## Default-tab prune safety
 

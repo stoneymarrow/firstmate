@@ -152,11 +152,11 @@ fm_herdr_primary_tuple_snapshot() {  # <session> <workspace> <tab> <pane>
   pane_get=$(fm_backend_herdr_cli "$session" pane get "$pane" 2>/dev/null) || return 1
   printf '%s' "$pane_get" | jq -e \
     --arg workspace "$workspace" --arg tab "$tab" --arg pane "$pane" \
-    --arg label "$FM_HERDR_PRIMARY_PANE_LABEL" '
+    --arg pane_label "$FM_HERDR_PRIMARY_PANE_LABEL" '
       .result.pane.workspace_id == $workspace
       and .result.pane.tab_id == $tab
       and .result.pane.pane_id == $pane
-      and (.result.pane.label // "") == $label
+      and (.result.pane.label // "") == $pane_label
     ' >/dev/null 2>&1
 }
 

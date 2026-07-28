@@ -186,6 +186,21 @@ SH
   chmod +x "$root/bin/fm-crew-state.sh"
   printf '%s\n' 'backend=herdr' 'herdr_session=shared' 'herdr_workspace_id=w1' \
     'herdr_tab_id=w1:t1' 'herdr_pane_id=w1:p1' > "$meta"
+  raw='state: idle · source: agent-state · label: invoice-check · worker · target: shared:w1:p1'
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
+    bash -c '
+      FM_ROOT=$FM_TEST_REPO; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT/state
+      DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      . "$FM_TEST_REPO/bin/fm-backend.sh"
+      SCRIPT_DIR=$FM_TEST_ROOT/bin
+      eval "$FM_TEST_HELPER"
+      crew_state_json fixture
+    ') || fail "exact no-detail state parser fixture failed"
+  printf '%s' "$parsed" | jq -e \
+    '.state == "idle" and .source == "agent-state" and .detail == ""' >/dev/null \
+    || fail "exact Herdr no-detail state retained display fields as detail"
+  pass "Herdr display: exact no-detail state strips display fields to empty detail"
+
   raw='state: paused · source: status-log · label:  · target: shared:w1:p1 · waiting for filing'
   parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
     bash -c '

@@ -147,29 +147,38 @@ Observed guarantee: a restored no-agent tab was replaced create-before-close, wh
 
 ### Readable labels and display isolation
 
-The remaining label subsystem has fixture-only proof dated 2026-07-27.
-These commands used fake Herdr inventories and did not read, rename, close, or otherwise mutate a live Herdr session:
+The readable-label subsystem and its 2026-07-28 corrections have fixture-only proof dated 2026-07-28.
+These commands used fake Herdr inventories, local files, or synthetic repositories and did not read, rename, close, or otherwise mutate a live Herdr session:
 
 ```sh
+bin/fm-test-run.sh tests/fm-backend-herdr.test.sh
+bin/fm-test-run.sh tests/fm-teardown.test.sh
 bin/fm-test-run.sh tests/fm-backend-herdr-labels.test.sh
 bin/fm-test-run.sh tests/fm-herdr-primary-labels.test.sh
 bin/fm-test-run.sh tests/fm-spawn-herdr-recovery.test.sh
 bin/fm-test-run.sh tests/fm-herdr-display-surfaces.test.sh
 bin/fm-test-run.sh tests/fm-promote-herdr.test.sh
+bin/fm-test-run.sh tests/fm-herdr-session-cleanup.test.sh
 ```
 
 Observed focused output included:
 
 ```text
+ok - fm_backend_herdr_workspace_ensure: the legacy captain workspace refuses and stays untouched
+ok - herdr teardown removes pane-owned escalation dedupe state
 ok - Herdr labels: native primary and firstmate project stay distinct
+ok - Herdr discovery: legacy firstmate workspace migrates only after proved native separation
 ok - Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse
 ok - Herdr session lock: globally unique physical sockets own lock identity
 ok - Herdr spawn recovery: v1 flat fallback excludes the projected child
 ok - Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent
+ok - Herdr full spawn: legacy native/shared workspace evidence refuses without mutation or publication
+ok - Herdr full spawn: formatter-unsafe task and project routes remain exact with stable readable labels
 ok - Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk
 ok - Herdr full spawn: unsafe parent publication rolls back its exact pane and same-id retry succeeds
 ok - Herdr full spawn: flat metadata publication failure rolls back its exact pane and same-id retry succeeds
 ok - Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first
+ok - Herdr display: exact no-detail state strips display fields to empty detail
 ok - Display isolation: synthetic non-Herdr state and snapshot output remain unchanged
 ok - Herdr metadata: complete-schema atomic publication refuses unsafe and unverifiable public paths
 ok - Herdr promotion: partial tab/pane failure retains intent and retry converges forward
@@ -177,7 +186,7 @@ ok - Herdr teardown: transition refusal applies only to validated Herdr metadata
 ok - Promotion compatibility: generic bytes stay legacy while malformed Herdr claims refuse
 ```
 
-The fixtures prove separate native-primary and project roles, exact legacy-label corroboration, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, response-pane rollback and same-id retry after task or parent publication failure, exact-ID response verification, label-first rendering, backend-scoped state-detail parsing, routing byte preservation, system-rename complete-record visibility with explicit refusal after a substituted rename lies, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
+The fixtures prove separate native-primary and project roles, refusal when old `firstmate` task evidence is native or cannot prove separation, safe migration of a distinct same-session legacy project workspace, deterministic display-only escaping for formatter-unsafe routes, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, response-pane rollback and same-id retry after task or parent publication failure, exact-ID response verification, label-first rendering including an empty detail for a valid no-detail Herdr state, byte preservation for malformed and non-Herdr state, routing byte preservation, system-rename complete-record visibility with explicit refusal after a substituted rename lies, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
 They do not prove that the current live primary, worker, or second mate has been renamed.
 
 The guarded current-live proof remains pending because this implementation lane had no authority to touch live Herdr state.
@@ -185,16 +194,17 @@ That proof must run from one lock-owning native Herdr primary with the exact `HE
 It must also inspect one newly published worker record and one newly published second-mate parent record, confirm their exact ids and readable labels plus the shared display-only session alias, and repeat the checks after one fresh-session rollover or supported recovery.
 The proof is complete only if the labels remain distinct and accurate, the machine targets remain unchanged, no `HERDR_LABELS:` diagnostic remains, and no live object was selected or mutated by label.
 
-### Per-home and presentation topology
+### Project and marked-home presentation topology
 
-Per-home behavior is owned by:
+Project-owned primary workspaces and stable marked second-mate-home workspaces are owned by:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 ```
 
-Observed guarantee: the primary and secondmate used distinct home workspaces, a child launched by the secondmate stayed in that secondmate workspace, list-live remained home-scoped, and exact cleanup did not affect sibling homes.
+Current fixture proof shows that separate primary projects keep separate readable workspaces, a marked second-mate home keeps one stable workspace for its child, exact metadata owns discovery, and cleanup does not infer sibling routes.
+The guarded current-live run of this topology remains pending.
 
 The complete projection suite ran on 2026-07-21 against Herdr 0.7.4 protocol 16:
 
@@ -207,7 +217,6 @@ Observed guarantees included:
 
 ```text
 ok - real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block
-ok - real Herdr lab: concurrent primary/A/B spawns stay session-locked with zero focus drift
 ok - real Herdr lab: session lock contention from a secondmate home refuses without a journal
 ok - real Herdr lab: legacy projection labels and flat secondmate tabs are left unmigrated
 ok - real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority

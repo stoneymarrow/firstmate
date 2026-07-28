@@ -235,14 +235,17 @@ crew_state_json() {  # <id>
           if [ "$exact_herdr" = 1 ]; then
             display_marker="${sep}target: "
             case "$detail" in
-              label:\ *"$display_marker"*"$sep"*)
+              label:\ *"$display_marker"*)
                 display_rest=${detail#label: }
                 display_label=${display_rest%%"$display_marker"*}
                 display_rest=${display_rest#*"$display_marker"}
                 display_target=${display_rest%%"$sep"*}
-                if [ -n "$display_label" ] && [ -n "$display_target" ] \
-                   && [ "$display_rest" != "$display_target" ]; then
-                  detail=${display_rest#*"$sep"}
+                if [ -n "$display_label" ] && [ -n "$display_target" ]; then
+                  if [ "$display_rest" = "$display_target" ]; then
+                    detail=
+                  else
+                    detail=${display_rest#*"$sep"}
+                  fi
                 fi
                 ;;
             esac
