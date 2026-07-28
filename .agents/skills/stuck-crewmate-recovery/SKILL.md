@@ -45,5 +45,6 @@ Escalate in order:
 4. If the crewmate is genuinely wedged after redirection, exit the agent with the adapter's exit command and relaunch with the same brief plus a `progress so far` note appended to it.
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
+   A worker stopped at its context ceiling is a different case with its own owner: if its status carries the decision key `context-rollover`, stop here and load `context-rollover` instead of relaunching from this playbook.
    The worktree and commits persist, so relaunch is cheap.
 5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

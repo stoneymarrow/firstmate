@@ -89,6 +89,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.kimi-turnend-token   firstmate-owned Kimi hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; kind=secondmate also records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, records one canonical pr= and the forge's pr_head= when available (GitHub pull requests and GitLab merge requests; docs/gitlab-merge-watch.md); fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
+  <id>.rollover      durable per-step record of a context rollover, written by fm-rollover.sh before the first mutation; removed by teardown
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
@@ -349,6 +350,9 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges and X-mode events.
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
+Whatever the wake kind, a status event carrying the decision key `context-rollover` means a worker is stopped at its context ceiling and only firstmate can start its successor; load `context-rollover` before acting on it.
+Never answer that event with an ordinary spawn, which allocates a fresh copy and abandons the stopped worker's unlanded work.
+
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.
 When X-linked work reaches a milestone or terminal state, load `fmx-respond`; before terminal teardown, always post the final completion follow-up so the link clears even if earlier follow-ups were spent.
 
@@ -470,6 +474,7 @@ It performs guarded fast-forward updates of firstmate and registered secondmate 
 These skills are not captain-invocable; load them only at their precise triggers.
 
 - `bootstrap-diagnostics` - load whenever the session-start digest's bootstrap section prints an actionable diagnostic line (`MISSING:`, `MISSING_MANUAL:`, `BACKEND_INVALID:`, `NEEDS_GH_AUTH`, `TANGLE:`, `CREW_DISPATCH: invalid`, `FLEET_SYNC:`, `PR_CHECK_MIGRATION:`, `SECONDMATE_SYNC:`, `SECONDMATE_LIVENESS:`, `NUDGE_SECONDMATES:`, or `FMX:`); silence and `BOOTSTRAP_INFO:` need no load.
+- `context-rollover` - load whenever a status event carries the decision key `context-rollover`, whatever the wake kind, and before acting on a stalled-rollover report.
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding, regardless of the project's `yolo` posture.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.

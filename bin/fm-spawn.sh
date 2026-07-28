@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--scout]
+# Usage: fm-spawn.sh <task-id> <project-dir> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--adopt-worktree <path>] [--brief <path>] [--scout]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
@@ -84,6 +84,21 @@
 #   default-branch commit when safe; skipped syncs warn and launch unchanged.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from the primary project checkout.
+#   --adopt-worktree <path> launches this ship/scout task into an EXISTING task
+#   worktree instead of allocating a fresh one with `treehouse get`. It is the
+#   mechanical half of a context rollover (bin/fm-rollover.sh): a successor must
+#   continue on the predecessor's preserved copy, and a fresh allocation would
+#   split one task across two copies. The path must be an existing git worktree
+#   root of the SAME repository as <project-dir> and must not be that primary
+#   checkout; the pane is moved there with `cd` and must settle on exactly that
+#   path before launch. It is refused for --secondmate (a home is not a task
+#   worktree) and for backend=orca (Orca allocates and owns its own worktree).
+#   --brief <path> launches with an alternate brief for this one launch. The path
+#   must be a regular file inside data/<task-id>/, so a rollover can hand the
+#   successor its own restate-first instructions without overwriting the task's
+#   original brief. Without it the brief stays data/<task-id>/brief.md.
+#   FM_SPAWN_SETTLE_POLLS caps the one-second polls that wait for the pane to
+#   settle in its worktree (default 60). Tests shorten it; production leaves it.
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
@@ -114,7 +129,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-  sed -n '2,78p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,101p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 case "${1:-}" in
@@ -151,10 +166,14 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 BACKEND_ARG=
+ADOPT_WT_ARG=
+BRIEF_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 BACKEND_SET=0
+ADOPT_WT_SET=0
+BRIEF_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -167,6 +186,8 @@ for a in "$@"; do
       model) MODEL=$a; MODEL_SET=1 ;;
       effort) EFFORT=$a; EFFORT_SET=1 ;;
       backend) BACKEND_ARG=$a; BACKEND_SET=1 ;;
+      adopt-worktree) ADOPT_WT_ARG=$a; ADOPT_WT_SET=1 ;;
+      brief) BRIEF_ARG=$a; BRIEF_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -183,6 +204,10 @@ for a in "$@"; do
     --effort=*) EFFORT=${a#--effort=}; EFFORT_SET=1 ;;
     --backend) want_value=backend ;;
     --backend=*) BACKEND_ARG=${a#--backend=}; BACKEND_SET=1 ;;
+    --adopt-worktree) want_value=adopt-worktree ;;
+    --adopt-worktree=*) ADOPT_WT_ARG=${a#--adopt-worktree=}; ADOPT_WT_SET=1 ;;
+    --brief) want_value=brief ;;
+    --brief=*) BRIEF_ARG=${a#--brief=}; BRIEF_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -191,6 +216,16 @@ done
 [ "$MODEL_SET" -eq 0 ] || [ -n "$MODEL" ] || { echo "error: --model requires a non-empty value" >&2; exit 1; }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || { echo "error: --effort requires a non-empty value" >&2; exit 1; }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || { echo "error: --backend requires a non-empty value" >&2; exit 1; }
+[ "$ADOPT_WT_SET" -eq 0 ] || [ -n "$ADOPT_WT_ARG" ] || { echo "error: --adopt-worktree requires a non-empty value" >&2; exit 1; }
+[ "$BRIEF_SET" -eq 0 ] || [ -n "$BRIEF_ARG" ] || { echo "error: --brief requires a non-empty value" >&2; exit 1; }
+if [ "$ADOPT_WT_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --adopt-worktree is a task-worktree flag and does not apply to --secondmate spawns" >&2
+  exit 1
+fi
+if [ "$BRIEF_SET" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  echo "error: --brief does not apply to --secondmate spawns; a secondmate launches on its own charter" >&2
+  exit 1
+fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
@@ -216,6 +251,10 @@ if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
 fi
 if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
   echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+  exit 1
+fi
+if [ "$BACKEND" = orca ] && [ "$ADOPT_WT_SET" -eq 1 ]; then
+  echo "error: backend=orca allocates and owns its own task worktree; --adopt-worktree is not supported" >&2
   exit 1
 fi
 if [ "$BACKEND" = orca ]; then
@@ -349,6 +388,13 @@ idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  # --adopt-worktree and --brief name ONE task's preserved copy and ONE task's
+  # instructions, so sharing either across a batch would point every pair at the
+  # same worktree or the same brief. Both are single-task only.
+  if [ "$ADOPT_WT_SET" -eq 1 ] || [ "$BRIEF_SET" -eq 1 ]; then
+    echo "error: --adopt-worktree and --brief name one task's own state; use them on a single-task spawn, not a batch" >&2
     exit 1
   fi
   rc=0
@@ -797,7 +843,22 @@ if [ "$KIND" = secondmate ]; then
 else
   PROJ_ABS="$(cd "$(resolve_project_dir_arg "$PROJ")" && pwd)"
   WT=""
-  BRIEF="$DATA/$ID/brief.md"
+  if [ "$BRIEF_SET" -eq 1 ]; then
+    # An alternate brief is confined to this task's own data directory: the
+    # launch command interpolates the path into a crewmate shell, so a caller
+    # must not be able to point a spawn at an arbitrary file elsewhere.
+    [ -f "$BRIEF_ARG" ] || { echo "error: --brief is not a regular file: $BRIEF_ARG" >&2; exit 1; }
+    BRIEF_ARG_DIR_REAL=$(cd "$(dirname "$BRIEF_ARG")" && pwd -P) || {
+      echo "error: --brief directory cannot be resolved: $BRIEF_ARG" >&2; exit 1; }
+    TASK_DATA_REAL=$(cd "$DATA/$ID" 2>/dev/null && pwd -P) || TASK_DATA_REAL=
+    if [ -z "$TASK_DATA_REAL" ] || [ "$BRIEF_ARG_DIR_REAL" != "$TASK_DATA_REAL" ]; then
+      echo "error: --brief must be a file inside $DATA/$ID; got $BRIEF_ARG" >&2
+      exit 1
+    fi
+    BRIEF="$BRIEF_ARG_DIR_REAL/$(basename "$BRIEF_ARG")"
+  else
+    BRIEF="$DATA/$ID/brief.md"
+  fi
 fi
 [ -f "$BRIEF" ] || { echo "error: no brief at $BRIEF" >&2; exit 1; }
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
@@ -848,6 +909,56 @@ validate_spawn_worktree() {  # <source> <inspect-target>
     echo "error: $source did not yield an isolated worktree (resolved '$WT'; worktree root '${wt_top:-none}'; primary '$PROJ_ABS'); refusing to launch to avoid tangling the primary checkout. Inspect target $inspect_target" >&2
     exit 1
   fi
+}
+
+# Resolve a directory's physical git common dir, so two paths can be proven to
+# belong to the same repository (a linked worktree and its main checkout share
+# one common dir, while an unrelated checkout has its own).
+git_common_dir_real() {  # <dir>
+  local dir=$1 common
+  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
+  [ -n "$common" ] || return 1
+  case "$common" in
+    /*) ;;
+    *) common="$dir/$common" ;;
+  esac
+  (cd "$common" 2>/dev/null && pwd -P) || return 1
+}
+
+# --adopt-worktree admission: the path must be an existing worktree root of the
+# SAME repository as the project and must not be the primary checkout. Proving
+# repository identity matters because the whole point of adopting is to continue
+# one task on its own preserved copy; a same-shaped worktree of another repo
+# would silently move the task somewhere else. Echoes the physical path.
+resolve_adopt_worktree() {  # <raw-path>
+  local raw=$1 wt_real wt_top wt_top_real wt_common proj_common
+  wt_real=$(cd "$raw" 2>/dev/null && pwd -P) || {
+    echo "error: --adopt-worktree does not exist or is not a directory: $raw" >&2
+    return 1
+  }
+  wt_top=$(git -C "$wt_real" rev-parse --show-toplevel 2>/dev/null || true)
+  wt_top_real=$(cd "$wt_top" 2>/dev/null && pwd -P) || wt_top_real=
+  if [ -z "$wt_top_real" ] || [ "$wt_top_real" != "$wt_real" ]; then
+    echo "error: --adopt-worktree is not a git worktree root: $raw (root '${wt_top:-none}')" >&2
+    return 1
+  fi
+  if [ "$wt_real" = "$PROJ_ABS_REAL" ]; then
+    echo "error: --adopt-worktree is the primary checkout $PROJ_ABS; refusing to launch a task into it" >&2
+    return 1
+  fi
+  wt_common=$(git_common_dir_real "$wt_real") || {
+    echo "error: --adopt-worktree has no resolvable git directory: $raw" >&2
+    return 1
+  }
+  proj_common=$(git_common_dir_real "$PROJ_ABS_REAL") || {
+    echo "error: project $PROJ_ABS has no resolvable git directory" >&2
+    return 1
+  }
+  if [ "$wt_common" != "$proj_common" ]; then
+    echo "error: --adopt-worktree $raw belongs to a different repository than $PROJ_ABS" >&2
+    return 1
+  fi
+  printf '%s\n' "$wt_real"
 }
 
 herdr_projection_meta_field_exact() {  # <meta> <key>
@@ -925,6 +1036,13 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
       ;;
   esac
 }
+
+# Admit the adopted worktree BEFORE any backend container or window is created,
+# so a bad path refuses without leaving a stray endpoint behind.
+ADOPT_WT=
+if [ "$ADOPT_WT_SET" -eq 1 ]; then
+  ADOPT_WT=$(resolve_adopt_worktree "$ADOPT_WT_ARG") || exit 1
+fi
 
 W="fm-$ID"
 case "$BACKEND" in
@@ -1226,7 +1344,15 @@ kimi_spawn_fail() {  # <detail>
 }
 
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  # An adopted worktree is entered with `cd`, never `treehouse get`: allocating a
+  # fresh copy is exactly what a rollover successor must not do. The settle loop
+  # below is shared, but an adopted spawn additionally requires the pane to land
+  # on THAT path, so a shell that failed to cd can never be mistaken for success.
+  if [ -n "$ADOPT_WT" ]; then
+    spawn_send_text_line "$WT_TARGET" "cd $(shell_quote "$ADOPT_WT")"
+  else
+    spawn_send_text_line "$WT_TARGET" 'treehouse get'
+  fi
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
   # Target the stable window id, not the name: if the name is ever lost (e.g. an
@@ -1249,11 +1375,12 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # pane that is already settled by the first real read only costs the one existing
   # inter-poll sleep as confirmation, not a whole extra cycle on top.
   candidate=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "${FM_SPAWN_SETTLE_POLLS:-60}"); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
       p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      if [ "$p_real" != "$PROJ_ABS_REAL" ] \
+         && { [ -z "$ADOPT_WT" ] || [ "$p_real" = "$ADOPT_WT" ]; }; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
@@ -1268,11 +1395,19 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     sleep 1
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter a worktree within 60s; inspect window $T" >&2
+    if [ -n "$ADOPT_WT" ]; then
+      echo "error: the pane did not settle in the adopted worktree $ADOPT_WT after ${FM_SPAWN_SETTLE_POLLS:-60} polls; inspect window $T" >&2
+    else
+      echo "error: treehouse get did not enter a worktree after ${FM_SPAWN_SETTLE_POLLS:-60} polls; inspect window $T" >&2
+    fi
     exit 1
   fi
 
-  validate_spawn_worktree "treehouse get" "$T"
+  if [ -n "$ADOPT_WT" ]; then
+    validate_spawn_worktree "--adopt-worktree" "$T"
+  else
+    validate_spawn_worktree "treehouse get" "$T"
+  fi
 fi
 
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
