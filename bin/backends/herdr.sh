@@ -1262,80 +1262,148 @@ fm_backend_herdr_metadata_label_matches() {  # <metadata-file> <field> <expected
   [ "$value" = "$3" ]
 }
 
+# Complete inventory validators used by exact tuple and response-owned cleanup
+# paths. Every consumed row is typed before a requested id can be interpreted.
+fm_backend_herdr_workspace_inventory_valid() {  # <json>
+  printf '%s' "$1" | jq -e '
+    (.result.workspaces | type) == "array"
+    and all(.result.workspaces[]?;
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.label | type) == "string" and (.label | length) > 0)
+    and ([.result.workspaces[].workspace_id] | length)
+        == ([.result.workspaces[].workspace_id] | unique | length)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_tab_inventory_valid() {  # <json> [expected-workspace]
+  local inventory=$1 expected=${2:-}
+  printf '%s' "$inventory" | jq -e --arg expected "$expected" '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[]?;
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.tab_id | type) == "string" and (.tab_id | length) > 0
+      and (.label | type) == "string"
+      and ($expected == "" or .workspace_id == $expected))
+    and ([.result.tabs[] | [.workspace_id,.tab_id]] | length)
+        == ([.result.tabs[] | [.workspace_id,.tab_id]] | unique | length)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_pane_inventory_valid() {  # <json> [expected-workspace]
+  local inventory=$1 expected=${2:-}
+  printf '%s' "$inventory" | jq -e --arg expected "$expected" '
+    (.result.panes | type) == "array"
+    and all(.result.panes[]?;
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.tab_id | type) == "string" and (.tab_id | length) > 0
+      and (.pane_id | type) == "string" and (.pane_id | length) > 0
+      and (.label | type) == "string"
+      and ($expected == "" or .workspace_id == $expected))
+    and ([.result.panes[] | [.workspace_id,.tab_id,.pane_id]] | length)
+        == ([.result.panes[] | [.workspace_id,.tab_id,.pane_id]] | unique | length)
+    and ([.result.panes[].pane_id] | length)
+        == ([.result.panes[].pane_id] | unique | length)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_pane_get_exact() {  # <json> <workspace> <tab> <pane>
+  printf '%s' "$1" | jq -e --arg workspace "$2" --arg tab "$3" --arg pane "$4" '
+    (.result.pane | type) == "object"
+    and (.result.pane.workspace_id | type) == "string"
+    and (.result.pane.workspace_id | length) > 0
+    and (.result.pane.tab_id | type) == "string"
+    and (.result.pane.tab_id | length) > 0
+    and (.result.pane.pane_id | type) == "string"
+    and (.result.pane.pane_id | length) > 0
+    and (.result.pane.label | type) == "string"
+    and (.result.pane.cwd | type) == "string"
+    and .result.pane.workspace_id == $workspace
+    and .result.pane.tab_id == $tab
+    and .result.pane.pane_id == $pane
+    and (.error? == null)
+  ' >/dev/null 2>&1
+}
+
+fm_backend_herdr_pane_get_not_found() {  # <json>
+  printf '%s' "$1" | jq -e '
+    .error.code == "pane_not_found"
+    and (.result.pane? == null)
+  ' >/dev/null 2>&1
+}
+
 # Classify one metadata-owned tuple as exact or positively absent at one
-# level. Any duplicate, cross-parent, partial, changed, or unreadable shape
-# refuses instead of being mistaken for absence.
+# level. Any malformed unrelated row, duplicate, cross-parent, partial,
+# changed, or unreadable shape refuses before requested ids are interpreted.
 fm_backend_herdr_live_tuple_state() {  # <session> <workspace> <tab> <pane> <one-pane:0|1> [workspace-list]
   local session=$1 wsid=$2 tab_id=$3 pane_id=$4 one_pane=$5 workspaces=${6:-}
-  local tabs panes pane_info code count exact_count pane_count
+  local tabs global_tabs panes pane_info count exact_count pane_count
   FM_BACKEND_HERDR_LIVE_TUPLE_STATE=""
   FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_LIVE_TAB_LABEL=""
   FM_BACKEND_HERDR_LIVE_PANE_LABEL=""
   FM_BACKEND_HERDR_LIVE_PANE_CWD=""
   [ -n "$workspaces" ] || workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
-  printf '%s' "$workspaces" | jq -e '(.result.workspaces | type) == "array"' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_workspace_inventory_valid "$workspaces" || return 1
   count=$(printf '%s' "$workspaces" | jq -r --arg workspace "$wsid" \
-    '[.result.workspaces[]? | select(.workspace_id == $workspace)] | length' 2>/dev/null) || return 1
+    '[.result.workspaces[] | select(.workspace_id == $workspace)] | length' 2>/dev/null) || return 1
   [ "$count" = 0 ] || [ "$count" = 1 ] || return 1
   if [ "$count" = 0 ]; then
     tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
-    printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+    fm_backend_herdr_tab_inventory_valid "$tabs" || return 1
     count=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
-      '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
+      '[.result.tabs[] | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
     [ "$count" = 0 ] || return 1
     if pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1); then :; fi
-    code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
-    [ "$code" = pane_not_found ] || return 1
+    fm_backend_herdr_pane_get_not_found "$pane_info" || return 1
     FM_BACKEND_HERDR_LIVE_TUPLE_STATE=missing-workspace
     return 0
   fi
   FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL=$(printf '%s' "$workspaces" | jq -er --arg workspace "$wsid" \
-    '.result.workspaces[] | select(.workspace_id == $workspace) | .label | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+    '.result.workspaces[] | select(.workspace_id == $workspace) | .label' 2>/dev/null) || return 1
 
   tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$tabs" | jq -e '(.result.tabs | type) == "array"' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_tab_inventory_valid "$tabs" "$wsid" || return 1
   count=$(printf '%s' "$tabs" | jq -r --arg tab "$tab_id" \
-    '[.result.tabs[]? | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
+    '[.result.tabs[] | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
   exact_count=$(printf '%s' "$tabs" | jq -r --arg workspace "$wsid" --arg tab "$tab_id" \
-    '[.result.tabs[]? | select(.workspace_id == $workspace and .tab_id == $tab)] | length' 2>/dev/null) || return 1
+    '[.result.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab)] | length' 2>/dev/null) || return 1
   if [ "$exact_count" = 0 ]; then
     [ "$count" = 0 ] || return 1
+    global_tabs=$(fm_backend_herdr_cli "$session" tab list 2>/dev/null) || return 1
+    fm_backend_herdr_tab_inventory_valid "$global_tabs" || return 1
+    count=$(printf '%s' "$global_tabs" | jq -r --arg tab "$tab_id" \
+      '[.result.tabs[] | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
+    [ "$count" = 0 ] || return 1
     if pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1); then :; fi
-    code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
-    [ "$code" = pane_not_found ] || return 1
+    fm_backend_herdr_pane_get_not_found "$pane_info" || return 1
     FM_BACKEND_HERDR_LIVE_TUPLE_STATE=missing-tab
     return 0
   fi
   [ "$count" = 1 ] && [ "$exact_count" = 1 ] || return 1
   FM_BACKEND_HERDR_LIVE_TAB_LABEL=$(printf '%s' "$tabs" | jq -er --arg workspace "$wsid" --arg tab "$tab_id" \
-    '.result.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab) | .label | select(type == "string" and length > 0)' 2>/dev/null) || return 1
+    '.result.tabs[] | select(.workspace_id == $workspace and .tab_id == $tab) | .label | select(length > 0)' 2>/dev/null) || return 1
 
   panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$wsid" 2>/dev/null) || return 1
-  printf '%s' "$panes" | jq -e '(.result.panes | type) == "array"' >/dev/null 2>&1 || return 1
+  fm_backend_herdr_pane_inventory_valid "$panes" "$wsid" || return 1
   count=$(printf '%s' "$panes" | jq -r --arg pane "$pane_id" \
-    '[.result.panes[]? | select(.pane_id == $pane)] | length' 2>/dev/null) || return 1
-  exact_count=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" --arg pane "$pane_id" \
-    '[.result.panes[]? | select(.tab_id == $tab and .pane_id == $pane)] | length' 2>/dev/null) || return 1
+    '[.result.panes[] | select(.pane_id == $pane)] | length' 2>/dev/null) || return 1
+  exact_count=$(printf '%s' "$panes" | jq -r --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$pane_id" \
+    '[.result.panes[] | select(.workspace_id == $workspace and .tab_id == $tab and .pane_id == $pane)] | length' 2>/dev/null) || return 1
   pane_count=$(printf '%s' "$panes" | jq -r --arg tab "$tab_id" \
-    '[.result.panes[]? | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
+    '[.result.panes[] | select(.tab_id == $tab)] | length' 2>/dev/null) || return 1
   if [ "$exact_count" = 0 ]; then
     [ "$count" = 0 ] && [ "$pane_count" = 0 ] || return 1
     if pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1); then :; fi
-    code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
-    [ "$code" = pane_not_found ] || return 1
+    fm_backend_herdr_pane_get_not_found "$pane_info" || return 1
     FM_BACKEND_HERDR_LIVE_TUPLE_STATE=missing-pane
     return 0
   fi
   [ "$count" = 1 ] && [ "$exact_count" = 1 ] || return 1
   [ "$one_pane" != 1 ] || [ "$pane_count" = 1 ] || return 1
   if pane_info=$(fm_backend_herdr_cli "$session" pane get "$pane_id" 2>&1); then :; fi
-  code=$(printf '%s' "$pane_info" | jq -r '.error.code // empty' 2>/dev/null)
-  [ -z "$code" ] || return 1
-  printf '%s' "$pane_info" | jq -e --arg workspace "$wsid" --arg tab "$tab_id" --arg pane "$pane_id" \
-    '.result.pane.workspace_id == $workspace and .result.pane.tab_id == $tab and .result.pane.pane_id == $pane' >/dev/null 2>&1 || return 1
-  FM_BACKEND_HERDR_LIVE_PANE_LABEL=$(printf '%s' "$pane_info" | jq -r '.result.pane.label // empty' 2>/dev/null)
-  FM_BACKEND_HERDR_LIVE_PANE_CWD=$(printf '%s' "$pane_info" | jq -r '.result.pane.cwd // empty' 2>/dev/null)
+  fm_backend_herdr_pane_get_exact "$pane_info" "$wsid" "$tab_id" "$pane_id" || return 1
+  FM_BACKEND_HERDR_LIVE_PANE_LABEL=$(printf '%s' "$pane_info" | jq -r '.result.pane.label' 2>/dev/null) || return 1
+  FM_BACKEND_HERDR_LIVE_PANE_CWD=$(printf '%s' "$pane_info" | jq -r '.result.pane.cwd' 2>/dev/null) || return 1
   FM_BACKEND_HERDR_LIVE_TUPLE_STATE=exact
 }
 
