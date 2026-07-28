@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--workflow]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,18 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --workflow writes the workflow contract into a ship or scout brief: firstmate
+#   has decided this task needs a workflow, and the brief carries the concrete
+#   shape the crewmate must build rather than an instruction to "use a workflow".
+#   The shape is four required environment variables, each one non-blank:
+#     FM_WORKFLOW_PHASES     ordered phases, one per line, each naming its output
+#     FM_WORKFLOW_FANOUT     what fans out across parallel agents, and over what unit
+#     FM_WORKFLOW_VERIFY     what checks each fanned-out result before it is used
+#     FM_WORKFLOW_SYNTHESIS  what turns the verified results into the deliverable
+#   A missing or blank field, or a field still holding a {placeholder}, refuses the
+#   scaffold: a shapeless workflow instruction is the failure this flag exists to
+#   prevent. Set FM_WORKFLOW_RUN='<command>' to override the start command the
+#   brief prints (default: the stock Pi dynamic-workflows explicit run).
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see the project-management skill
 # and AGENTS.md task lifecycle):
@@ -72,6 +84,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
+WORKFLOW=0
 NO_PROJECTS=0
 POS=()
 for a in "$@"; do
@@ -79,6 +92,7 @@ for a in "$@"; do
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
+    --workflow) WORKFLOW=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
     *) POS+=("$a") ;;
   esac
@@ -88,6 +102,36 @@ ID=${POS[0]}
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
   exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ "$WORKFLOW" -eq 1 ]; then
+  echo "error: --workflow applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+# The whole point of --workflow is that the brief carries a SHAPE. A field that is
+# missing, blank, or still a {placeholder} would produce exactly the vague "use a
+# workflow" instruction this flag exists to replace, so it refuses the scaffold.
+WORKFLOW_SECTION=""
+WORKFLOW_NOTE=""
+if [ "$WORKFLOW" -eq 1 ]; then
+  WORKFLOW_NOTE=", workflow shape attached"
+  missing=""
+  for field in FM_WORKFLOW_PHASES FM_WORKFLOW_FANOUT FM_WORKFLOW_VERIFY FM_WORKFLOW_SYNTHESIS; do
+    eval "value=\${$field-}"
+    case "$value" in
+      *[![:space:]]*) ;;
+      *) missing="$missing $field"; continue ;;
+    esac
+    case "$value" in
+      *'{'*'}'*) missing="$missing $field(placeholder)" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    echo "error: --workflow needs a concrete shape; these are blank or still a placeholder:$missing" >&2
+    echo "       set FM_WORKFLOW_PHASES, FM_WORKFLOW_FANOUT, FM_WORKFLOW_VERIFY and FM_WORKFLOW_SYNTHESIS" >&2
+    exit 1
+  fi
 fi
 
 if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
@@ -226,6 +270,32 @@ EOF
 )
 fi
 
+if [ "$WORKFLOW" -eq 1 ]; then
+WORKFLOW_RUN=${FM_WORKFLOW_RUN:-/workflows run <prompt>}
+WORKFLOW_SECTION="# Workflow - REQUIRED SHAPE
+Firstmate decided this task needs a workflow, and this is the shape to build.
+It is the contract, not a suggestion: build these phases, this fan-out, this verification and this synthesis.
+Do not collapse it into a single pass, and do not substitute a different shape because it looks quicker.
+
+**Phases** (in order; each one's output is the next one's input)
+$FM_WORKFLOW_PHASES
+
+**Fan-out** - what runs in parallel, and over what unit
+$FM_WORKFLOW_FANOUT
+
+**Verification** - what checks each fanned-out result before anything downstream uses it
+$FM_WORKFLOW_VERIFY
+
+**Synthesis** - what turns the verified results into the deliverable
+$FM_WORKFLOW_SYNTHESIS
+
+Start it explicitly with \`$WORKFLOW_RUN\`.
+Automatic keyword triggering is off by policy, so nothing starts a run except an explicit command or a direct tool call; runs are backgrounded by default, so the controlling session stays responsive.
+A worker inside a workflow cannot spawn workers of its own, so every parallel unit above must be a direct child of the workflow, never a helper nested inside one.
+If this shape cannot be built as written, append \`needs-decision: {which part of the workflow shape does not fit and why}\` and stop. Do not silently reshape it.
+"
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -234,7 +304,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
-
+${WORKFLOW_SECTION:+
+$WORKFLOW_SECTION}
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -270,7 +341,7 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/decision-hold-l
 When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
-echo "scaffolded: $BRIEF (scout; replace {TASK})"
+echo "scaffolded: $BRIEF (scout${WORKFLOW_NOTE}; replace {TASK})"
 exit 0
 fi
 
@@ -340,7 +411,8 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
-
+${WORKFLOW_SECTION:+
+$WORKFLOW_SECTION}
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
@@ -384,4 +456,4 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK})"
+echo "scaffolded: $BRIEF (ship, mode=$MODE${WORKFLOW_NOTE}; replace {TASK})"

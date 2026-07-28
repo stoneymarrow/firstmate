@@ -382,6 +382,89 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# --- workflow shape ---------------------------------------------------------
+#
+# The failure this guards against is a brief that tells a crewmate to "use a
+# workflow" and leaves the shape to it. --workflow either carries a concrete
+# shape or refuses to scaffold.
+
+wf_env() {
+  FM_WORKFLOW_PHASES='1. survey - list the candidate files
+2. audit - one finding list per file
+3. report - one merged table' \
+  FM_WORKFLOW_FANOUT='phase 2, one agent per candidate file' \
+  FM_WORKFLOW_VERIFY='every finding must cite file:line and be rechecked against the file' \
+  FM_WORKFLOW_SYNTHESIS='phase 3 merges the verified lists into one table by severity' \
+  "$@"
+}
+
+test_workflow_refuses_a_shapeless_brief() {
+  local home="$TMP_ROOT/wf-blank" out rc
+  mkdir -p "$home/data"
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf1 someproj --workflow 2>&1); rc=$?
+  expect_code 1 "$rc" "--workflow with no shape must refuse the scaffold"
+  assert_contains "$out" "needs a concrete shape" "the refusal must name the missing shape"
+  [ -e "$home/data/wf1/brief.md" ] && fail "a refused --workflow scaffold must write no brief"
+  pass "fm-brief: --workflow refuses a brief with no shape"
+}
+
+test_workflow_refuses_a_placeholder_shape() {
+  local home="$TMP_ROOT/wf-ph" out rc
+  mkdir -p "$home/data"
+  out=$(FM_WORKFLOW_PHASES='{phases}' FM_WORKFLOW_FANOUT=a FM_WORKFLOW_VERIFY=b FM_WORKFLOW_SYNTHESIS=c \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf2 someproj --workflow 2>&1); rc=$?
+  expect_code 1 "$rc" "an unreplaced placeholder is not a shape"
+  assert_contains "$out" "placeholder" "the refusal must name the placeholder field"
+  pass "fm-brief: --workflow refuses an unreplaced placeholder shape"
+}
+
+test_workflow_writes_the_whole_shape_into_the_brief() {
+  local home="$TMP_ROOT/wf-ok" brief out
+  mkdir -p "$home/data"
+  out=$(wf_env env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf3 someproj --workflow 2>&1)
+  assert_contains "$out" "workflow shape attached" "the scaffold must report that a shape was attached"
+  brief="$home/data/wf3/brief.md"
+  assert_grep "Workflow - REQUIRED SHAPE" "$brief" "the brief must carry the workflow contract"
+  assert_grep "one agent per candidate file" "$brief" "the brief must carry the fan-out"
+  assert_grep "cite file:line" "$brief" "the brief must carry the verification"
+  assert_grep "merges the verified lists" "$brief" "the brief must carry the synthesis"
+  assert_grep "audit - one finding list per file" "$brief" "the brief must carry every phase line"
+  assert_grep "cannot be built as written" "$brief" "the brief must route a shape that does not fit back to firstmate"
+  pass "fm-brief: --workflow writes the decision and the whole shape into the brief"
+}
+
+test_workflow_shape_reaches_scout_briefs_too() {
+  local home="$TMP_ROOT/wf-scout"
+  mkdir -p "$home/data"
+  wf_env env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf4 someproj --scout --workflow >/dev/null 2>&1 ||
+    fail "a scout brief must accept --workflow"
+  assert_grep "Workflow - REQUIRED SHAPE" "$home/data/wf4/brief.md" "a scout brief must carry the workflow contract"
+  pass "fm-brief: a scout brief carries the workflow shape"
+}
+
+test_brief_without_workflow_carries_no_workflow_section() {
+  local home="$TMP_ROOT/wf-none"
+  mkdir -p "$home/data"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf5 someproj >/dev/null 2>&1 || fail "an ordinary ship brief must still scaffold"
+  grep -q "Workflow - REQUIRED SHAPE" "$home/data/wf5/brief.md" &&
+    fail "a brief firstmate did not mark as needing a workflow must carry no workflow contract"
+  pass "fm-brief: an ordinary brief carries no workflow contract"
+}
+
+test_workflow_is_refused_on_a_secondmate_charter() {
+  local home="$TMP_ROOT/wf-2m" rc
+  mkdir -p "$home/data"
+  wf_env env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" wf6 --secondmate --no-projects --workflow >/dev/null 2>&1; rc=$?
+  expect_code 1 "$rc" "a persistent charter is not a task and takes no workflow shape"
+  pass "fm-brief: --workflow is refused on a secondmate charter"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -397,3 +480,9 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_workflow_refuses_a_shapeless_brief
+test_workflow_refuses_a_placeholder_shape
+test_workflow_writes_the_whole_shape_into_the_brief
+test_workflow_shape_reaches_scout_briefs_too
+test_brief_without_workflow_carries_no_workflow_section
+test_workflow_is_refused_on_a_secondmate_charter
