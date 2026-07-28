@@ -19,6 +19,18 @@ BRIEF="$ROOT/bin/fm-brief.sh"
 SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
 
+# A ship or scout scaffold is a dispatch and needs a dispatch record.
+mkdir -p "$TMP_ROOT"
+FM_DISPATCH_RECORD="$TMP_ROOT/dispatch.rec"
+{
+  printf 'harness=claude\nmodel=opus-5\neffort=high\n'
+  printf 'wisdom=fixture dispatch for this suite\n'
+  printf 'diligence=fixture effort reason for this suite\n'
+  printf 'recorded_at=%s\n' "$(date +%s)"
+} > "$FM_DISPATCH_RECORD"
+export FM_DISPATCH_RECORD
+
+
 approval_contract() {
   awk '
     /^### Selected delivery path and approval authority$/ { found = 1; next }
@@ -131,7 +143,7 @@ test_primary_and_secondmate_instruction_generation() {
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies the authority contract in its \`AGENTS.md\`" "$ship" \
     "generated implementation brief bypasses the primary authority owner"
-  assert_grep "silently bypass firstmate's authority check and any required captain escalation" "$ship" \
+  assert_grep "silently bypass the firstmate authority check and any required captain escalation" "$ship" \
     "generated implementation brief permits silent ask-user auto-resolution"
   assert_no_grep 'the captain, not you, owns the ask-user decisions' "$ship" \
     "generated implementation brief retained conflicting captain-only wording"

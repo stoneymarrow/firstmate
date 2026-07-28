@@ -18,6 +18,18 @@ TMP_ROOT=$(fm_test_tmproot fm-brief)
 BRIEF_HOME="$TMP_ROOT/home"
 mkdir -p "$BRIEF_HOME/data"
 
+# Every scaffold below is a dispatch, so each one needs a dispatch record. One
+# valid record, written fresh so it is never stale, keeps the existing cases
+# about what they were about; the refusal cases build their own.
+VALID_DISPATCH="$TMP_ROOT/dispatch.rec"
+{
+  printf 'harness=claude\nmodel=opus-5\neffort=high\n'
+  printf 'wisdom=no existing pattern fits this decomposition\n'
+  printf 'diligence=every migration path has to be traced\n'
+  printf 'recorded_at=%s\n' "$(date +%s)"
+} > "$VALID_DISPATCH"
+export FM_DISPATCH_RECORD="$VALID_DISPATCH"
+
 # The script itself must always parse. This is the direct regression test for
 # issue #166: a stray apostrophe in any of the three DOD heredoc bodies
 # (no-mistakes/direct-PR/local-only) breaks `bash -n` on the whole file.
@@ -382,6 +394,99 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# A brief is the worker's session shape, so a dispatch nobody wrote down, or
+# wrote down badly, must not become one. Every case here is a real run of the
+# real script.
+test_dispatch_record_refusals() {
+  local home="$TMP_ROOT/dispatch-refusals" rec="$TMP_ROOT/case.rec" now out status
+  mkdir -p "$home/data"
+  now=$(date +%s)
+
+  refuse() {
+    local label=$1 want=$2 id=$3
+    shift 3
+    out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj "$@" 2>&1); status=$?
+    expect_code 1 "$status" "fm-brief.sh must refuse $label"
+    assert_contains "$out" "$want" "refusing $label did not name the fault"
+    [ -e "$home/data/$id/brief.md" ] && fail "fm-brief.sh wrote a brief while refusing $label"
+    return 0
+  }
+
+  out=$(env -u FM_DISPATCH_RECORD FM_HOME="$home" "$ROOT/bin/fm-brief.sh" d-none some-proj 2>&1); status=$?
+  expect_code 1 "$status" "fm-brief.sh must refuse a scaffold with no dispatch record"
+  assert_contains "$out" "no dispatch record" "refusing an absent record did not say so"
+
+  refuse "an unreadable record" "missing or unreadable" d-gone --dispatch "$TMP_ROOT/not-here.rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\n' > "$rec"
+  refuse "a record missing recorded_at" "missing recorded_at" d-miss --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=\nwisdom=w\ndiligence=d\nrecorded_at=%s\n' "$now" > "$rec"
+  refuse "a record with an empty field" "missing effort" d-empty --dispatch "$rec"
+
+  printf 'harness claude\n' > "$rec"
+  refuse "a line that is not key=value" "malformed, not key=value" d-line --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=soon\n' > "$rec"
+  refuse "a non-numeric recorded_at" "malformed recorded_at" d-ts --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=%s\nseat=worker\n' "$now" > "$rec"
+  refuse "an unknown field" "unknown field: seat" d-unknown --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=%s\nmodel=other\n' "$now" > "$rec"
+  refuse "a repeated field" "repeats the field: model" d-dup --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=%s\n' "$((now - 7200))" > "$rec"
+  refuse "a record decided two hours ago" "is stale" d-stale --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=%s\n' "$((now + 9000))" > "$rec"
+  refuse "a record dated in the future" "dated in the future" d-future --dispatch "$rec"
+
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=same\ndiligence=same\nrecorded_at=%s\n' "$now" > "$rec"
+  refuse "one reason standing in for both axes" "separate decisions" d-onereason --dispatch "$rec"
+
+  # The age limit is configurable, and a malformed limit is refused rather than
+  # silently treated as no limit at all.
+  printf 'harness=claude\nmodel=opus-5\neffort=high\nwisdom=w\ndiligence=d\nrecorded_at=%s\n' "$((now - 60))" > "$rec"
+  out=$(FM_DISPATCH_MAX_AGE=10 FM_HOME="$home" "$ROOT/bin/fm-brief.sh" d-age some-proj --dispatch "$rec" 2>&1); status=$?
+  expect_code 1 "$status" "fm-brief.sh must honour a tightened FM_DISPATCH_MAX_AGE"
+  out=$(FM_DISPATCH_MAX_AGE=oops FM_HOME="$home" "$ROOT/bin/fm-brief.sh" d-badage some-proj --dispatch "$rec" 2>&1); status=$?
+  expect_code 1 "$status" "fm-brief.sh must refuse a malformed FM_DISPATCH_MAX_AGE"
+  assert_contains "$out" "FM_DISPATCH_MAX_AGE is malformed" "a malformed age limit was not named"
+
+  pass "fm-brief.sh: a missing, stale or malformed dispatch record refuses the scaffold and names the fault"
+}
+
+# The accepted dispatch and the session-shape rules have to reach the worker,
+# in every generated variant. A worker inherits its shape from its brief.
+test_every_brief_carries_dispatch_and_delegation_shape() {
+  local home="$TMP_ROOT/shape" brief
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" s-ship some-proj >/dev/null 2>&1 \
+    || fail "ship scaffold with a valid dispatch record exited non-zero"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" s-scout some-proj --scout >/dev/null 2>&1 \
+    || fail "scout scaffold with a valid dispatch record exited non-zero"
+  FM_SECONDMATE_CHARTER='Supervise the alpha domain.' FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" s-sm --secondmate alpha >/dev/null 2>&1 \
+    || fail "secondmate scaffold with a valid dispatch record exited non-zero"
+
+  for brief in "$home/data/s-ship/brief.md" "$home/data/s-scout/brief.md" "$home/data/s-sm/brief.md"; do
+    assert_present "$brief" "scaffold did not write $brief"
+    assert_grep "model opus-5, at high effort" "$brief" "$brief lost the dispatch it was made under"
+    assert_grep "Model capability was chosen because" "$brief" "$brief did not state the wisdom reason"
+    assert_grep "Reasoning effort was chosen because" "$brief" "$brief did not state the diligence reason"
+    assert_grep "Delegation shape" "$brief" "$brief carries no session-shape contract"
+    assert_grep "Decompose first" "$brief" "$brief does not require decomposition"
+    assert_grep "8 KB" "$brief" "$brief does not set the delegated-read threshold"
+    assert_grep "screenshot" "$brief" "$brief does not delegate screenshots"
+    assert_grep "fan several readers out" "$brief" "$brief does not require exploration fan-out"
+    assert_grep "Never poll and never re-arm" "$brief" "$brief does not ban polling and re-arm loops"
+    assert_grep "check cap and a growing interval" "$brief" "$brief gives no lawful no-channel fallback"
+    assert_grep "Keep startup lean" "$brief" "$brief does not require startup hygiene"
+  done
+  pass "fm-brief.sh: every generated brief carries its dispatch and the session-shape contract"
+}
+
 test_script_parses
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
@@ -397,3 +502,5 @@ test_secondmate_marked_request_reporting_contract
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_dispatch_record_refusals
+test_every_brief_carries_dispatch_and_delegation_shape

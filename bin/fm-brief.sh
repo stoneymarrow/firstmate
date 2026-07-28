@@ -45,6 +45,31 @@
 # over copied detail) and has the crewmate add the fm-ensure-agents-md.sh
 # self-governance section when a touched project AGENTS.md lacks it.
 # Refuses to overwrite an existing brief.
+#
+# DISPATCH RECORD (required for ship and scout briefs; optional for a
+# persistent secondmate charter, which is a home rather than one dispatch)
+# A worker inherits its session shape from the brief that spawned it, so the
+# scaffold refuses to write one until the dispatch behind it is on record.
+# Point FM_DISPATCH_RECORD at a file of key=value lines, or pass
+# --dispatch <path>:
+#   harness=claude
+#   model=opus-5
+#   effort=high
+#   wisdom=<why the task needs that much model capability>
+#   diligence=<why the task needs that much reasoning effort>
+#   recorded_at=<epoch seconds when the dispatch was decided>
+# Capability and effort are separate decisions, so wisdom and diligence must be
+# argued separately; the same reason text for both is refused.
+# The scaffold refuses a record that is absent, unreadable, missing a field,
+# malformed (a line that is not key=value, an unknown or repeated key, a
+# non-numeric recorded_at), or stale (recorded_at in the future, or older than
+# FM_DISPATCH_MAX_AGE seconds, default 3600). Each refusal names the exact
+# field and the exact fault. Set FM_DISPATCH_RECORD=none only for a scaffold
+# that is deliberately not a dispatch, such as a test fixture.
+# The accepted record is written into the brief, and every generated brief
+# carries the delegation-shape contract: explicit decomposition, reads over
+# 8 KB and all screenshots delegated to a cheap reader, an event-driven wait
+# instead of a foreground poll or a re-arm loop, and lean session-start reads.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,17 +98,100 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+DISPATCH_RECORD=${FM_DISPATCH_RECORD:-}
 POS=()
+take_dispatch=0
 for a in "$@"; do
+  if [ "$take_dispatch" -eq 1 ]; then
+    DISPATCH_RECORD=$a
+    take_dispatch=0
+    continue
+  fi
   case "$a" in
     --scout) KIND=scout ;;
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --dispatch) take_dispatch=1 ;;
+    --dispatch=*) DISPATCH_RECORD=${a#--dispatch=} ;;
     *) POS+=("$a") ;;
   esac
 done
+if [ "$take_dispatch" -eq 1 ]; then
+  echo "error: --dispatch needs the path to a dispatch record" >&2
+  exit 1
+fi
 ID=${POS[0]}
+
+# A brief is the worker's session shape, so it is not written until the dispatch
+# behind it is on record. Refusals name the field and the fault, because
+# "invalid record" tells the caller nothing about what to fix.
+refuse_dispatch() {
+  echo "error: refusing to scaffold $ID: $1" >&2
+  exit 1
+}
+
+DISPATCH_BLOCK=""
+read_dispatch_record() {
+  [ -n "$DISPATCH_RECORD" ] || refuse_dispatch \
+    "no dispatch record; set FM_DISPATCH_RECORD or pass --dispatch <path> (see this script's header)"
+  if [ "$DISPATCH_RECORD" = none ]; then
+    return 0
+  fi
+  [ -r "$DISPATCH_RECORD" ] || refuse_dispatch \
+    "dispatch record $DISPATCH_RECORD is missing or unreadable"
+  local line key value seen="" required="harness model effort wisdom diligence recorded_at"
+  local d_harness="" d_model="" d_effort="" d_wisdom="" d_diligence="" d_recorded_at=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+      *=*) ;;
+      *) refuse_dispatch "dispatch record line is malformed, not key=value: $line" ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case " $required " in
+      *" $key "*) ;;
+      *) refuse_dispatch "dispatch record has an unknown field: $key" ;;
+    esac
+    case " $seen " in
+      *" $key "*) refuse_dispatch "dispatch record repeats the field: $key" ;;
+    esac
+    seen="$seen $key"
+    printf -v "d_$key" '%s' "$value"
+  done < "$DISPATCH_RECORD"
+  # Indirect expansion rather than a nameref: stock macOS bash is 3.2.
+  local varname current
+  for key in $required; do
+    varname="d_$key"
+    current=${!varname}
+    [ -n "${current// /}" ] || refuse_dispatch "dispatch record is missing $key"
+  done
+  case "$d_recorded_at" in
+    ''|*[!0-9]*) refuse_dispatch "dispatch record has a malformed recorded_at: $d_recorded_at" ;;
+  esac
+  local now age max=${FM_DISPATCH_MAX_AGE:-3600}
+  case "$max" in
+    ''|*[!0-9]*) refuse_dispatch "FM_DISPATCH_MAX_AGE is malformed: $max" ;;
+  esac
+  now=$(date +%s)
+  if [ "$d_recorded_at" -gt "$now" ]; then
+    refuse_dispatch "dispatch record is dated in the future: recorded_at=$d_recorded_at, now=$now"
+  fi
+  age=$((now - d_recorded_at))
+  if [ "$age" -gt "$max" ]; then
+    refuse_dispatch "dispatch record is stale: decided ${age}s ago, limit ${max}s; re-decide the dispatch"
+  fi
+  if [ "$d_wisdom" = "$d_diligence" ]; then
+    refuse_dispatch "dispatch record argues wisdom and diligence with the same reason; model capability and reasoning effort are separate decisions"
+  fi
+  DISPATCH_BLOCK=$(printf '%s\n' \
+    "# Dispatch" \
+    "You were dispatched on $d_harness, model $d_model, at $d_effort effort." \
+    "Model capability was chosen because: $d_wisdom" \
+    "Reasoning effort was chosen because: $d_diligence" \
+    "Those are separate decisions. If the work turns out to need a different one, say which axis and why in a status line rather than compensating with the other.")
+}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -97,7 +205,38 @@ fi
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
+if [ "$KIND" != secondmate ]; then
+  read_dispatch_record
+elif [ -n "$DISPATCH_RECORD" ] && [ "$DISPATCH_RECORD" != none ]; then
+  read_dispatch_record
+fi
 mkdir -p "$DATA/$ID"
+
+DELEGATION_SHAPE=$(cat <<'EOF'
+# Delegation shape - session-shape contract
+Your context window is a budget you spend, and most of it is spent on habits
+rather than on the work. These four rules are how this task stays inside it.
+
+1. **Decompose first.** Split at the first unrelated thread, not the fourth.
+   Finish one thread, record what it produced, then start the next. Do not carry
+   several unrelated threads in one window because they happen to share a task.
+2. **Delegate bulky reads and every screenshot.** Any read expected to return
+   more than about 8 KB - a long file, a transcript, a log, a report, a diff, a
+   directory sweep - goes to a cheap reader subagent, and so does every
+   screenshot. Take back findings with paths and line numbers, never the raw
+   text. To explore, fan several readers out over different areas at once
+   rather than sweeping them one at a time yourself. Say plainly what has to
+   stay in your own window and why.
+3. **Never poll and never re-arm.** Wait on the event channel wherever one
+   exists. Where none exists, declare a check cap and a growing interval before
+   you start, and escalate when you hit the cap instead of quietly going round
+   again. A fixed-interval foreground loop, and re-arming the same wait over and
+   over, are both banned outright: a chatty loop costs more window than the data
+   it returns.
+4. **Keep startup lean.** Read what this turn needs. Do not load an always-read
+   surface on principle before you know which part of it the turn touches.
+EOF
+)
 
 shell_quote() {
   printf "'"
@@ -139,6 +278,10 @@ $SECONDMATE_SCOPE
 
 # Project clones
 $PROJECT_CLONES_BODY
+
+$DISPATCH_BLOCK
+
+$DELEGATION_SHAPE
 
 # Operating model
 You are in an isolated firstmate home. The local \`AGENTS.md\` is your job description, and your local \`data/\`, \`state/\`, \`config/\`, and \`projects/\` dirs are yours to operate.
@@ -233,6 +376,10 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 # Task
 {TASK}
 
+$DISPATCH_BLOCK
+
+$DELEGATION_SHAPE
+
 $HERDR_SECTION
 
 # Setup
@@ -325,7 +472,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - ask-user findings are never yours to answer: escalate to firstmate (rule 6) and stop.
   Firstmate applies the authority contract in its \`AGENTS.md\` and obtains any required captain decision.
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
-- Avoid \`--yes\`: it would silently bypass firstmate's authority check and any required captain escalation.
+- Avoid \`--yes\`: it would silently bypass the firstmate authority check and any required captain escalation.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
@@ -338,6 +485,10 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 
 # Task
 {TASK}
+
+$DISPATCH_BLOCK
+
+$DELEGATION_SHAPE
 
 $HERDR_SECTION
 
