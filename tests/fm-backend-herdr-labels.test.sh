@@ -363,16 +363,21 @@ test_missing_tab_reuses_workspace_and_creates_task() {
   meta="$home/state/invoice-check.meta"; metadata "$meta" ship /srv/payments w1 old:t1 old:p1
   printf 'herdr_workspace_label=payments · primary\n' >> "$meta"
   log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+  # Calls 3 and 8 are the global `tab list` cross-check the missing-tab path
+  # now makes before it will call an exact tab absent, so a tab living under a
+  # different workspace cannot be misread as gone.
   response "$dir" 1 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · primary"}]}}'
   response "$dir" 2 '{"result":{"tabs":[]}}'
-  response "$dir" 3 '{"error":{"code":"pane_not_found"}}'
-  response "$dir" 4 '{"result":{"tabs":[]}}'
-  response "$dir" 5 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · primary"}]}}'
-  response "$dir" 6 '{"result":{"tabs":[]}}'
-  response "$dir" 7 '{"error":{"code":"pane_not_found"}}'
-  response "$dir" 8 '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
-  response "$dir" 9 '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2","label":"invoice-check · worker"}}}'
-  response "$dir" 10 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":"invoice-check · worker"}}}'
+  response "$dir" 3 '{"result":{"tabs":[]}}'
+  response "$dir" 4 '{"error":{"code":"pane_not_found"}}'
+  response "$dir" 5 '{"result":{"tabs":[]}}'
+  response "$dir" 6 '{"result":{"workspaces":[{"workspace_id":"w1","label":"payments · primary"}]}}'
+  response "$dir" 7 '{"result":{"tabs":[]}}'
+  response "$dir" 8 '{"result":{"tabs":[]}}'
+  response "$dir" 9 '{"error":{"code":"pane_not_found"}}'
+  response "$dir" 10 '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+  response "$dir" 11 '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2","label":"invoice-check · worker"}}}'
+  response "$dir" 12 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":"invoice-check · worker"}}}'
   out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_create_task \
     fmtest:w1 invoice-check ship /srv/payments '' "$meta") \
     || fail "positively absent tab did not recreate the task"
