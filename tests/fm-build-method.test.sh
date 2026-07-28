@@ -99,7 +99,11 @@ test_spawn_wires_the_method_into_ordinary_dispatch() {
   local claude_line pi_line
   claude_line=$(grep -n 'claude --dangerously-skip-permissions' "$spawn")
   assert_contains "$claude_line" "__METHODFLAG__" "the claude launch template must carry the Build-method placeholder"
-  pi_line=$(grep -n "pi __METHODFLAG__" "$spawn")
+  # The harness name is a variable here, not a literal, because pi and pi-signed
+  # share this template. Pin the crewmate pi template by the extension flag that
+  # distinguishes it from the secondmate one, so the placeholder check survives
+  # another adapter joining the branch.
+  pi_line=$(grep -n '__METHODFLAG____MODELFLAG____EFFORTFLAG__-e __PIEXT__' "$spawn")
   [ -n "$pi_line" ] || fail "the pi crewmate launch template must carry the Build-method placeholder"
   assert_contains "$(cat "$spawn")" 'LAUNCH=${LAUNCH//__METHODFLAG__/$METHODFLAG}' "fm-spawn must substitute the Build-method placeholder"
   assert_contains "$(cat "$spawn")" 'echo "tasktype=$TASK_TYPE"' "fm-spawn must record the task type in the meta"
