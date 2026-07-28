@@ -168,13 +168,17 @@ ok - fm_backend_herdr_workspace_ensure: the legacy captain workspace refuses and
 ok - herdr teardown removes pane-owned escalation dedupe state
 ok - Herdr labels: native primary and firstmate project stay distinct
 ok - Herdr discovery: legacy firstmate workspace migrates only after proved native separation
+ok - Herdr native proof: exact live tuple is required without caller-global leakage
 ok - Herdr bare selector: one exact global tab succeeds; duplicates and multi-pane matches refuse
+ok - Herdr primary labels: tmux precedence keeps the outer native tuple inert
 ok - Herdr session lock: globally unique physical sockets own lock identity
 ok - Herdr spawn recovery: v1 flat fallback excludes the projected child
 ok - Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent
 ok - Herdr full spawn: legacy native/shared workspace evidence refuses without mutation or publication
 ok - Herdr full spawn: formatter-unsafe task and project routes remain exact with stable readable labels
 ok - Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk
+ok - Herdr full spawn: missing parent tab or pane recovers only in the exact owned workspace
+ok - Herdr full spawn: parent republish failure rolls back and a third same-id retry converges
 ok - Herdr full spawn: unsafe parent publication rolls back its exact pane and same-id retry succeeds
 ok - Herdr full spawn: flat metadata publication failure rolls back its exact pane and same-id retry succeeds
 ok - Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first
@@ -186,7 +190,7 @@ ok - Herdr teardown: transition refusal applies only to validated Herdr metadata
 ok - Promotion compatibility: generic bytes stay legacy while malformed Herdr claims refuse
 ```
 
-The fixtures prove separate native-primary and project roles, refusal when old `firstmate` task evidence is native or cannot prove separation, safe migration of a distinct same-session legacy project workspace, deterministic display-only escaping for formatter-unsafe routes, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, response-pane rollback and same-id retry after task or parent publication failure, exact-ID response verification, label-first rendering including an empty detail for a valid no-detail Herdr state, byte preservation for malformed and non-Herdr state, routing byte preservation, system-rename complete-record visibility with explicit refusal after a substituted rename lies, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
+The fixtures prove separate native-primary and project roles, refusal when old or converged primary task evidence names the native workspace or lacks an exact live ambient tuple, safe migration of a distinct same-session legacy project workspace, inner-tmux owner inactivity, deterministic display-only escaping for formatter-unsafe routes, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, exact-husk and positively absent parent recovery, rollback plus third-attempt recovery after parent republishing fails, response-pane rollback and same-id retry after task or parent publication failure, exact-ID response verification, label-first rendering including an empty detail for a valid no-detail Herdr state, byte preservation for malformed and non-Herdr state, routing byte preservation, system-rename complete-record visibility with explicit refusal after a substituted rename lies, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
 They do not prove that the current live primary, worker, or second mate has been renamed.
 
 The guarded current-live proof remains pending because this implementation lane had no authority to touch live Herdr state.

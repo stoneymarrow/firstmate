@@ -152,7 +152,7 @@ run_labels() {  # <fakebin> [process-cwd]
   PATH="$fakebin:$PATH" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FIXTURE_HOME" FM_STATE_OVERRIDE="$FIXTURE_HOME/state" \
     FM_HERDR_TEST_STATE="$FIXTURE_STATE" FM_HERDR_TEST_LOG="$FIXTURE_LOG" \
-    FM_HERDR_TEST_PROCESS_CWD="$process_cwd" \
+    FM_HERDR_TEST_PROCESS_CWD="$process_cwd" TMUX='' \
     HERDR_ENV=1 HERDR_SOCKET_PATH="$FIXTURE_SOCKET" \
     HERDR_WORKSPACE_ID=w1 HERDR_TAB_ID=w1:t1 HERDR_PANE_ID=w1:p1 \
     "$ROOT/bin/fm-herdr-primary-labels.sh"
@@ -170,6 +170,24 @@ test_inert_without_exact_environment() {
   [ -z "$out" ] || fail "inert primary-label path printed '$out'"
   [ ! -s "$FIXTURE_LOG" ] || fail "inert primary-label path called Herdr"
   pass "Herdr primary labels: missing exact native tuple stays inert and silent"
+}
+
+# Runtime detection gives an inner tmux pane precedence over inherited outer
+# Herdr variables, so the native-label owner must stay silent and call nothing.
+test_inert_inside_tmux_with_outer_herdr_tuple() {
+  local dir fake out
+  dir="$TMP_ROOT/inert-tmux"; setup_fixture "$dir"; fake=$(make_fakebin "$dir")
+  out=$(PATH="$fake:$PATH" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$FIXTURE_HOME" FM_STATE_OVERRIDE="$FIXTURE_HOME/state" \
+    FM_HERDR_TEST_STATE="$FIXTURE_STATE" FM_HERDR_TEST_LOG="$FIXTURE_LOG" \
+    FM_HERDR_TEST_PROCESS_CWD="$ROOT" TMUX='outer-session,4242,0' \
+    HERDR_ENV=1 HERDR_SOCKET_PATH="$FIXTURE_SOCKET" \
+    HERDR_WORKSPACE_ID=w1 HERDR_TAB_ID=w1:t1 HERDR_PANE_ID=w1:p1 \
+    "$ROOT/bin/fm-herdr-primary-labels.sh" 2>&1) \
+    || fail "tmux-precedence primary-label path failed: $out"
+  [ -z "$out" ] || fail "tmux-precedence primary-label path printed '$out'"
+  [ ! -s "$FIXTURE_LOG" ] || fail "tmux-precedence primary-label path called Herdr"
+  pass "Herdr primary labels: tmux precedence keeps the outer native tuple inert"
 }
 
 # Full process ownership permits only exact-ID renames and converges silently.
@@ -337,6 +355,7 @@ SH
 }
 
 test_inert_without_exact_environment
+test_inert_inside_tmux_with_outer_herdr_tuple
 test_session_start_locked_wiring
 test_owned_success
 test_ownership_refusals

@@ -51,8 +51,8 @@ Workspace and tab creation use `--no-focus`.
 The first workspace in a completely empty Herdr session must become focused because no prior target exists, but later task creation does not intentionally steal focus.
 
 Locked native session start may rename the already-running primary workspace, tab, and pane to `firstmate · primary` through `bin/fm-herdr-primary-labels.sh`.
-It acts only on a process-owned exact tuple under the physical-socket session lock, never publishes task ownership for that tuple, and never closes an object.
-A refusal or partial rename prints `HERDR_LABELS:`, an already-converged success stays silent, and a read-only start or marked secondmate home leaves the owner inert.
+It acts only when the ambient workspace, tab, and pane are one exact live relationship in the canonical physical-socket session and the process proof matches, never publishes task ownership for that tuple, and never closes an object.
+A refusal or partial rename prints `HERDR_LABELS:`, an already-converged success stays silent, and a read-only start, inner tmux primary, or marked secondmate home leaves the owner inert.
 The script header owns the exact lock, process, socket, accepted-label, rename, and convergence checks.
 
 Herdr does not enforce workspace, tab, or pane label uniqueness.
@@ -164,6 +164,8 @@ The current structural gate removes label inference from cleanup authority.
 The recorded pane remains the operational fast path, while workspace and tab ids support exact verification and cleanup.
 With the system same-directory rename, Herdr task and parent publication gives readers a complete prior or new record; the exact validation, post-rename refusal, cleanup, and substituted-rename limit live in the relevant script headers.
 A crash after second-mate parent publication but before primary task publication can recover only the exact one-pane, no-agent husk named by the validated child-home parent record, after which both records must publish one identical tuple before launch.
+If replacing that husk closes the old tab but parent republishing fails, the replacement rolls back and the unchanged validated record remains retryable only when its old workspace, tab, or pane is positively and repeatedly absent.
+An absent old workspace grants no authority over the distinct response-owned replacement container, while an absent tab or pane can reuse only the exact owned workspace after current identity and label checks.
 
 For Herdr records, session start, fleet JSON, fleet view, crew state, send errors, and interactive peek place the readable label before the machine target.
 Fleet JSON keeps schema `fm-fleet-snapshot.v1` and preserves `endpoint.target` while adding Herdr-only `display_label` and `session_display_label` keys before it.

@@ -140,7 +140,11 @@ test_legacy_firstmate_workspace_requires_proved_native_separation() {
   response "$dir" 3 '{"result":{"panes":[{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1"}]}}'
   response "$dir" 4 '{"result":{"pane":{"workspace_id":"old","tab_id":"old:t1","pane_id":"old:p1","label":"invoice-check · worker"}}}'
   response "$dir" 5 "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$socket\"}]}"
-  response "$dir" 6 '{"result":{"workspace":{"workspace_id":"old","label":"firstmate · project"}}}'
+  response "$dir" 6 '{"result":{"workspaces":[{"workspace_id":"native","label":"firstmate · primary"},{"workspace_id":"old","label":"firstmate"}]}}'
+  response "$dir" 7 '{"result":{"tabs":[{"workspace_id":"native","tab_id":"native:t1","label":"firstmate · primary"}]}}'
+  response "$dir" 8 '{"result":{"panes":[{"workspace_id":"native","tab_id":"native:t1","pane_id":"native:p1","label":"firstmate · primary"}]}}'
+  response "$dir" 9 '{"result":{"pane":{"workspace_id":"native","tab_id":"native:t1","pane_id":"native:p1","label":"firstmate · primary"}}}'
+  response "$dir" 10 '{"result":{"workspace":{"workspace_id":"old","label":"firstmate · project"}}}'
   out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" \
     FM_HERDR_RESPONSES="$dir/responses" HERDR_ENV=1 HERDR_SOCKET_PATH="$socket" \
     HERDR_WORKSPACE_ID=native HERDR_TAB_ID=native:t1 HERDR_PANE_ID=native:p1 \
@@ -153,6 +157,64 @@ test_legacy_firstmate_workspace_requires_proved_native_separation() {
   assert_not_contains "$calls" $'workspace\037rename\037native' \
     "proved non-native migration touched the native workspace"
   pass "Herdr discovery: legacy firstmate workspace migrates only after proved native separation"
+}
+
+# The ambient native helper proves the complete live relationship and keeps
+# caller-owned live-tuple globals untouched. Cross-parent and unreadable shapes
+# return no workspace authority even when every environment string is valid.
+test_native_workspace_requires_exact_live_tuple() {
+  local mode dir home log fake socket out status
+  for mode in exact wrong-tab-parent wrong-pane-parent unreadable; do
+    dir="$TMP_ROOT/native-live-$mode"; home="$dir/home"; mkdir -p "$home/state" "$dir/session"
+    socket="$dir/session/herdr.sock"; : > "$socket"
+    log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
+    response "$dir" 1 "{\"sessions\":[{\"name\":\"fmtest\",\"running\":true,\"socket_path\":\"$socket\"}]}"
+    if [ "$mode" = unreadable ]; then
+      response "$dir" 2 'not-json'
+    else
+      response "$dir" 2 '{"result":{"workspaces":[{"workspace_id":"native","label":"firstmate · primary"}]}}'
+      if [ "$mode" = wrong-tab-parent ]; then
+        response "$dir" 3 '{"result":{"tabs":[{"workspace_id":"foreign","tab_id":"native:t1","label":"firstmate · primary"}]}}'
+      else
+        response "$dir" 3 '{"result":{"tabs":[{"workspace_id":"native","tab_id":"native:t1","label":"firstmate · primary"}]}}'
+        if [ "$mode" = wrong-pane-parent ]; then
+          response "$dir" 4 '{"result":{"panes":[{"workspace_id":"native","tab_id":"foreign:t1","pane_id":"native:p1","label":"firstmate · primary"}]}}'
+        else
+          response "$dir" 4 '{"result":{"panes":[{"workspace_id":"native","tab_id":"native:t1","pane_id":"native:p1","label":"firstmate · primary"}]}}'
+          response "$dir" 5 '{"result":{"pane":{"workspace_id":"native","tab_id":"native:t1","pane_id":"native:p1","label":"firstmate · primary"}}}'
+        fi
+      fi
+    fi
+    out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_HERDR_LOG="$log" \
+      FM_HERDR_RESPONSES="$dir/responses" HERDR_ENV=1 HERDR_SOCKET_PATH="$socket" \
+      HERDR_WORKSPACE_ID=native HERDR_TAB_ID=native:t1 HERDR_PANE_ID=native:p1 \
+      FM_TEST_OUTPUT="$dir/native.out" bash -c '
+        . "$0/bin/backends/herdr.sh"
+        FM_BACKEND_HERDR_LIVE_TUPLE_STATE=caller-state
+        FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL=caller-workspace
+        FM_BACKEND_HERDR_LIVE_TAB_LABEL=caller-tab
+        FM_BACKEND_HERDR_LIVE_PANE_LABEL=caller-pane
+        if fm_backend_herdr_native_workspace_for_session fmtest > "$FM_TEST_OUTPUT"; then
+          rc=0
+        else
+          rc=$?
+        fi
+        printf "%s|%s|%s|%s|%s" "$rc" "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" \
+          "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" "$FM_BACKEND_HERDR_LIVE_TAB_LABEL" \
+          "$FM_BACKEND_HERDR_LIVE_PANE_LABEL"
+      ' "$ROOT")
+    status=${out%%|*}
+    [ "$out" = "$status|caller-state|caller-workspace|caller-tab|caller-pane" ] \
+      || fail "$mode native proof overwrote caller live-tuple globals: $out"
+    if [ "$mode" = exact ]; then
+      [ "$status" = 0 ] && [ "$(cat "$dir/native.out")" = native ] \
+        || fail "exact live native tuple did not return its workspace"
+    else
+      [ "$status" -ne 0 ] && [ ! -s "$dir/native.out" ] \
+        || fail "$mode native tuple shape granted workspace authority"
+    fi
+  done
+  pass "Herdr native proof: exact live tuple is required without caller-global leakage"
 }
 
 # A primary workspace is adopted only through its complete metadata tuple;
@@ -902,6 +964,7 @@ test_strict_adapter_owned_labels
 test_malformed_metadata_refuses
 test_prior_project_label_requires_exact_metadata
 test_legacy_firstmate_workspace_requires_proved_native_separation
+test_native_workspace_requires_exact_live_tuple
 test_exact_workspace_discovery_refuses_semantic_duplicate
 test_marked_workspace_collision_is_untouched
 test_prefix_free_list_live_uses_only_exact_local_metadata
