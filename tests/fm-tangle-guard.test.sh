@@ -22,6 +22,18 @@ set -u
 . "$ROOT/bin/fm-tangle-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-tangle-guard)
+
+# A ship or scout scaffold is a dispatch and needs a dispatch record.
+mkdir -p "$TMP_ROOT"
+FM_DISPATCH_RECORD="$TMP_ROOT/dispatch.rec"
+{
+  printf 'harness=claude\nmodel=opus-5\neffort=high\n'
+  printf 'wisdom=fixture dispatch for this suite\n'
+  printf 'diligence=fixture effort reason for this suite\n'
+  printf 'recorded_at=%s\n' "$(date +%s)"
+} > "$FM_DISPATCH_RECORD"
+export FM_DISPATCH_RECORD
+
 fm_git_identity fmtest fmtest@example.invalid
 
 # A fresh git repo on `main` with one commit. Echoes its path.
