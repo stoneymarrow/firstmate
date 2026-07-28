@@ -46,6 +46,25 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Autonomous pickup (config/autonomous-pickup)
+
+This local, gitignored file is the one declaration deciding whether an item the captain captured, rather than commissioned, may be dispatched without him asking.
+It holds one word on one line: `on` or `off`.
+It ships absent, and absent means off, so no home gains autonomous pickup by installing firstmate.
+Every other reading is also off, each with a stated cause: unreadable, not UTF-8, larger than 64 bytes, more than one line, or any word that is not exactly `on`.
+
+Two readers consume this file and there is only one implementation of those rules, Launchpad's `launchpad.pickup` module.
+`bin/fm-intake.sh` reaches that module rather than re-reading the file, so the Firstmate chat adapter and Launchpad's Inbox drain can never answer differently.
+When the Launchpad source tree is not reachable, `bin/fm-intake.sh` reports off and classifies nothing rather than falling back to a second reader.
+
+Run `bin/fm-intake.sh pickup` to see the current value, its cause, and the exact file consulted.
+Resolution follows Launchpad's order: the `LAUNCHPAD_PICKUP_DECLARATION` environment variable, a `[pickup].declaration` path in Launchpad's `config.toml`, `$FM_HOME/config/autonomous-pickup`, then `~/dev/firstmate/config/autonomous-pickup`.
+Deploying the file is the dotfiles managed installer's job; firstmate's shared tracked material never writes it.
+
+With the declaration off, `bin/fm-intake.sh capture` still records a Firstmate-work capture in the backlog, but records it held for the captain, so `tasks-axi ready` never offers it.
+With it on, only a high-confidence Firstmate-work capture lands unheld; personal tasks, notes, ideas, questions, reading items and ambiguous captures never do, and an unheld item still passes the ordinary brief, safety and dispatch checks.
+`config/backlog-backend=manual` or incompatible `tasks-axi` stops the handoff: the capture is filed in the vault, the exact manual backlog step is printed, and the run exits 4 rather than reporting anything as dispatchable.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.
