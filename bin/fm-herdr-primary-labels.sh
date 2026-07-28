@@ -3,8 +3,9 @@
 # onto one readable primary label after proving this process owns all three.
 #
 # This owner runs only from the locked path of fm-session-start.sh. It is inert
-# outside a native Herdr pane, in a marked second-mate home, or when any exact
-# Herdr socket/workspace/tab/pane environment identity is absent. It requires
+# outside a native Herdr pane, inside tmux even when outer Herdr variables are
+# inherited, in a marked second-mate home, or when any exact Herdr socket,
+# workspace, tab, or pane environment identity is absent. It requires
 # one globally unique physical running socket, then takes that socket's shared
 # mutation lock before process and tuple checks. It never publishes a native-
 # primary ownership record, creates or closes an object, mutates by label, or
@@ -316,6 +317,7 @@ fm_herdr_primary_labels_run() {
 
 fm_herdr_primary_labels_main() {
   [ "${HERDR_ENV:-}" = 1 ] || return 0
+  [ -z "${TMUX:-}" ] || return 0
   [ ! -e "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] \
     && [ ! -L "$FM_HOME/$FM_BACKEND_HERDR_SECONDMATE_MARKER" ] || return 0
   [ -n "${HERDR_SOCKET_PATH:-}" ] \

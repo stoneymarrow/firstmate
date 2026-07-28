@@ -709,8 +709,10 @@ fm_backend_herdr_presentation_session_lock_path() {  # <session>
 }
 
 # Return the native primary workspace id only when the complete ambient Herdr
-# tuple and socket prove that it belongs to this exact named session. A bare
-# workspace id is not enough because Herdr ids may repeat across sessions.
+# tuple is one exact live workspace/tab/pane relationship in this exact named
+# session and the ambient socket has the same canonical physical identity.
+# The tuple proof runs in a subshell so its live-read globals cannot overwrite
+# caller-owned discovery state. A bare workspace id grants no authority.
 fm_backend_herdr_native_workspace_for_session() {  # <session>
   local session=$1 value ambient_socket session_socket
   [ "${HERDR_ENV:-}" = 1 ] || return 1
@@ -721,7 +723,11 @@ fm_backend_herdr_native_workspace_for_session() {  # <session>
   ambient_socket=$(fm_backend_herdr_canonical_socket_path "$HERDR_SOCKET_PATH") || return 1
   session_socket=$(fm_backend_herdr_presentation_session_socket_path "$session") || return 1
   [ "$ambient_socket" = "$session_socket" ] || return 1
-  printf '%s' "$HERDR_WORKSPACE_ID"
+  (
+    fm_backend_herdr_live_tuple_load "$session" "$HERDR_WORKSPACE_ID" \
+      "$HERDR_TAB_ID" "$HERDR_PANE_ID" 0 || exit 1
+    printf '%s' "$HERDR_WORKSPACE_ID"
+  )
 }
 
 # fm_backend_herdr_projection_focus_snapshot: print the exact active
@@ -1373,7 +1379,7 @@ fm_backend_herdr_workspace_find() {  # <session> <project-or-home> [task-meta] [
   local exact_parent=${5:-} exact_parent_prior=${6:-} state="$FM_HOME/state" parent_meta
   local meta backend kind record_project record_identity record_home home_identity id subject
   local desired prior="" legacy readable task_legacy target_identity list wsid current recorded
-  local exact_wsid="" exact_label="" foreign_wsids="" paths="" marked=0 count native_workspace
+  local exact_wsid="" exact_label="" foreign_wsids="" paths="" marked=0 count native_workspace native_label
   FM_BACKEND_HERDR_WS_FOUND_ID=""
   FM_BACKEND_HERDR_WS_CURRENT_LABEL=""
   fm_backend_herdr_metadata_validate_home "$state" || return 1
@@ -1491,15 +1497,20 @@ fm_backend_herdr_workspace_find() {  # <session> <project-or-home> [task-meta] [
       [ "$current" = "$desired" ] || [ "$current" = "$legacy" ] \
         || { [ -n "$prior" ] && [ "$current" = "$prior" ]; } || return 1
     fi
-    if [ "$marked" -eq 0 ] && [ "$legacy" = firstmate ] && [ "$current" = firstmate ]; then
-      native_workspace=$(fm_backend_herdr_native_workspace_for_session "$session" 2>/dev/null) || {
-        echo "error: legacy primary-home herdr workspace could be the native primary; exact native session identity is required" >&2
-        return 1
-      }
-      [ "$wsid" != "$native_workspace" ] || {
-        echo "error: legacy task metadata names the native primary herdr workspace; refusing project adoption" >&2
-        return 1
-      }
+    if [ "$marked" -eq 0 ]; then
+      native_label=$(fm_backend_herdr_format_label firstmate primary) || return 1
+      case "$current" in
+        firstmate|"$native_label")
+          native_workspace=$(fm_backend_herdr_native_workspace_for_session "$session" 2>/dev/null) || {
+            echo "error: primary-looking project workspace could be the native primary; one exact live native tuple in this named session is required" >&2
+            return 1
+          }
+          [ "$wsid" != "$native_workspace" ] || {
+            echo "error: task metadata names the native primary herdr workspace; refusing project adoption" >&2
+            return 1
+          }
+          ;;
+      esac
     fi
     case "$meta" in
       */.herdr-parent.meta) id=$(fm_backend_herdr_meta_field_exact "$meta" task_id 2>/dev/null) || return 1 ;;
@@ -1867,9 +1878,47 @@ fm_backend_herdr_husk_snapshot_exact() {  # <session> <workspace> <tab> <pane> <
   fm_backend_herdr_husk_snapshot_loaded_exact "$@"
 }
 
+# Prove the current parent-recovery container by exact id and the one derived
+# workspace label. A distinct old workspace id must remain absent. A non-empty
+# seeded tab proves that this call is using the response-owned workspace just
+# created by workspace_ensure rather than authority from the stale parent id.
+fm_backend_herdr_parent_recovery_container_exact() {  # <session> <current-workspace> <workspace-label> <old-workspace> [response-seeded-tab]
+  local session=$1 current=$2 workspace_label=$3 old=$4 seeded_tab=${5:-} workspaces tabs
+  workspaces=$(fm_backend_herdr_cli "$session" workspace list 2>/dev/null) || return 1
+  printf '%s' "$workspaces" | jq -e \
+    --arg current "$current" --arg workspace_label "$workspace_label" --arg old "$old" '
+      (.result.workspaces | type) == "array"
+      and all(.result.workspaces[]?;
+        (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+        and (.label | type) == "string" and (.label | length) > 0)
+      and ([.result.workspaces[].workspace_id] | length)
+          == ([.result.workspaces[].workspace_id] | unique | length)
+      and ([.result.workspaces[]?
+            | select(.workspace_id == $current and .label == $workspace_label)] | length) == 1
+      and ([.result.workspaces[]? | select(.label == $workspace_label)] | length) == 1
+      and ($old == $current
+           or ([.result.workspaces[]? | select(.workspace_id == $old)] | length) == 0)
+    ' >/dev/null 2>&1 || return 1
+  [ -n "$seeded_tab" ] || return 0
+  tabs=$(fm_backend_herdr_cli "$session" tab list --workspace "$current" 2>/dev/null) || return 1
+  printf '%s' "$tabs" | jq -e --arg current "$current" --arg seeded "$seeded_tab" '
+    (.result.tabs | type) == "array"
+    and all(.result.tabs[]?;
+      (.workspace_id | type) == "string" and (.workspace_id | length) > 0
+      and (.tab_id | type) == "string" and (.tab_id | length) > 0
+      and (.label | type) == "string")
+    and ([.result.tabs[] | [.workspace_id,.tab_id]] | length)
+        == ([.result.tabs[] | [.workspace_id,.tab_id]] | unique | length)
+    and ([.result.tabs[]?
+          | select(.workspace_id == $current and .tab_id == $seeded and .label == "1")]
+         | length) == 1
+  ' >/dev/null 2>&1
+}
+
 # Create one readable task. An exact no-agent husk is replaced only after two
-# matching snapshots. Positively absent metadata objects are recreated without
-# closing or renaming any old object; every ambiguous partial match refuses.
+# matching snapshots. Positively absent metadata objects are recreated only
+# after two identical absence classifications and without closing or renaming
+# any old object; every ambiguous partial match refuses.
 fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <seeded-tab-id> [task-metadata] [parent-output] [secondmate-parent-recovery]
   local container=$1 id=$2 kind=$3 cwd=$4 seeded_tab_id=${5:-} meta=${6:-} parent_meta=${7:-}
   local parent_recovery=${8:-}
@@ -1982,7 +2031,6 @@ fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <see
     meta_workspace=$FM_BACKEND_HERDR_META_WORKSPACE
     exact_tab=$FM_BACKEND_HERDR_META_TAB
     exact_pane=$FM_BACKEND_HERDR_META_PANE
-    [ "$meta_workspace" = "$wsid" ] || return 1
     meta_project=$(fm_backend_herdr_meta_field_exact "$parent_recovery" project) || return 1
     meta_worktree=$(fm_backend_herdr_meta_field_exact "$parent_recovery" worktree) || return 1
     recorded_workspace_label=$(fm_backend_herdr_meta_field_exact \
@@ -1992,19 +2040,50 @@ fm_backend_herdr_create_task() {  # <container> <task-id> <task-kind> <cwd> <see
     recorded_pane_label=$(fm_backend_herdr_meta_field_exact \
       "$parent_recovery" herdr_pane_label) || return 1
     fm_backend_herdr_live_tuple_state "$session" "$meta_workspace" \
-      "$exact_tab" "$exact_pane" 1 || return 1
-    [ "$FM_BACKEND_HERDR_LIVE_TUPLE_STATE" = exact ] || {
-      echo "error: second-mate parent recovery requires its exact existing workspace, tab, and pane" >&2
+      "$exact_tab" "$exact_pane" 1 || {
+      echo "error: second-mate parent recovery endpoint is unreadable, changed, duplicate, or cross-parent" >&2
       return 1
     }
-    snapshot_before=$(fm_backend_herdr_husk_snapshot_loaded_exact \
-      "$session" "$wsid" "$exact_tab" "$exact_pane" "$readable" "$legacy" \
-      "$recorded_tab_label" "$recorded_pane_label" "$meta_project" "$meta_worktree") || {
-      echo "error: second-mate parent recovery endpoint is not one exact no-agent husk" >&2
-      return 1
-    }
-    collision_exempt=$exact_tab
-    replace_husk=1
+    tuple_state=$FM_BACKEND_HERDR_LIVE_TUPLE_STATE
+    case "$tuple_state" in
+      exact)
+        [ -z "$seeded_tab_id" ] && [ "$meta_workspace" = "$wsid" ] || return 1
+        fm_backend_herdr_parent_recovery_container_exact \
+          "$session" "$wsid" "$recorded_workspace_label" "$meta_workspace" || return 1
+        snapshot_before=$(fm_backend_herdr_husk_snapshot_loaded_exact \
+          "$session" "$wsid" "$exact_tab" "$exact_pane" "$readable" "$legacy" \
+          "$recorded_tab_label" "$recorded_pane_label" "$meta_project" "$meta_worktree") || {
+          echo "error: second-mate parent recovery endpoint is not one exact no-agent husk" >&2
+          return 1
+        }
+        collision_exempt=$exact_tab
+        replace_husk=1
+        ;;
+      missing-tab|missing-pane)
+        [ -z "$seeded_tab_id" ] && [ "$meta_workspace" = "$wsid" ] || return 1
+        [ "$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL" = "$recorded_workspace_label" ] || return 1
+        if [ "$tuple_state" = missing-pane ]; then
+          [ "$FM_BACKEND_HERDR_LIVE_TAB_LABEL" = "$recorded_tab_label" ] || return 1
+          collision_exempt=$exact_tab
+        fi
+        fm_backend_herdr_parent_recovery_container_exact \
+          "$session" "$wsid" "$recorded_workspace_label" "$meta_workspace" || return 1
+        missing_workspace_label=$FM_BACKEND_HERDR_LIVE_WORKSPACE_LABEL
+        missing_tab_label=$FM_BACKEND_HERDR_LIVE_TAB_LABEL
+        ;;
+      missing-workspace)
+        [ -n "$seeded_tab_id" ] && [ "$meta_workspace" != "$wsid" ] || {
+          echo "error: absent second-mate parent workspace requires a distinct response-owned replacement container" >&2
+          return 1
+        }
+        fm_backend_herdr_parent_recovery_container_exact \
+          "$session" "$wsid" "$recorded_workspace_label" "$meta_workspace" "$seeded_tab_id" || {
+          echo "error: second-mate parent recovery replacement container is foreign or ambiguous" >&2
+          return 1
+        }
+        ;;
+      *) return 1 ;;
+    esac
   fi
 
   list=$(fm_backend_herdr_cli "$session" tab list --workspace "$wsid" 2>/dev/null) || return 1

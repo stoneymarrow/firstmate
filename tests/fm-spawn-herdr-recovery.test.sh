@@ -161,6 +161,16 @@ elif cmd == ("workspace", "rename"):
         save()
         emit({"result": {"workspace": {"workspace_id": row["workspace_id"], "label": row["label"]}}})
 elif cmd == ("tab", "list"):
+    fault = state["faults"].get("restore_parent_on_tab_list")
+    if fault:
+        fault["seen"] = fault.get("seen", 0) + 1
+        if fault["seen"] == fault["trigger"]:
+            if not tab(fault["tab"]["tab_id"]):
+                state["tabs"].append(fault["tab"])
+            if not pane(fault["pane"]["pane_id"]):
+                state["panes"].append(fault["pane"])
+            state["faults"].pop("restore_parent_on_tab_list", None)
+        save()
     wsid = option("--workspace")
     rows = [row for row in state["tabs"] if not wsid or row["workspace_id"] == wsid]
     emit({"result": {"tabs": rows}})
@@ -463,14 +473,15 @@ JS
   pass "Herdr full spawn: native primary and Firstmate project remain distinct"
 }
 
-# Legacy primary-home evidence may name the old `firstmate` project workspace.
-# If that workspace is the native primary, or the ambient native tuple cannot
-# prove a distinct same-session workspace, the full spawn must preserve all
-# prior evidence and stop before any Herdr mutation, launch, or publication.
+# Primary-home evidence may name either the old `firstmate` workspace or the
+# converged `firstmate · primary` workspace. If that workspace is the native
+# primary, or the ambient native tuple cannot prove a distinct same-session
+# workspace, the full spawn must preserve all prior evidence and stop before
+# any Herdr mutation, launch, or publication.
 test_real_spawn_refuses_legacy_native_workspace_adoption() {
   local mode dir home project worktree id fake state log socket meta meta_before state_before
-  local out status calls
-  for mode in shared-native insufficient-native; do
+  local out status calls workspace_label primary_tab_label primary_pane_label
+  for mode in shared-native converged-native insufficient-native; do
     dir="$TMP_ROOT/full-legacy-native-$mode"
     home="$dir/home"; project="$dir/firstmate"; worktree="$dir/worktree"
     id="legacy-native-${mode}-$$"
@@ -479,25 +490,34 @@ test_real_spawn_refuses_legacy_native_workspace_adoption() {
     make_worker_home "$home" "$id"
     fake=$(make_stateful_herdr "$dir")
     state="$dir/state.json"; log="$dir/herdr.log"; socket=$(jq -r '.socket' "$state")
+    workspace_label=firstmate
+    primary_tab_label=1
+    primary_pane_label=
+    if [ "$mode" = converged-native ]; then
+      workspace_label='firstmate · primary'
+      primary_tab_label='firstmate · primary'
+      primary_pane_label='firstmate · primary'
+    fi
     # shellcheck disable=SC2016  # jq variables, not shell expansion
     state_update "$state" --arg root "$ROOT" --arg project "$project" \
-      --arg worktree "$worktree" --arg id "$id" '
-      .workspaces = [{workspace_id:"native",label:"firstmate",focused:true,active_tab_id:"native:t0"}]
+      --arg worktree "$worktree" --arg id "$id" --arg workspace_label "$workspace_label" \
+      --arg primary_tab_label "$primary_tab_label" --arg primary_pane_label "$primary_pane_label" '
+      .workspaces = [{workspace_id:"native",label:$workspace_label,focused:true,active_tab_id:"native:t0"}]
       | .tabs = [
-          {workspace_id:"native",tab_id:"native:t0",label:"1",focused:true},
+          {workspace_id:"native",tab_id:"native:t0",label:$primary_tab_label,focused:true},
           {workspace_id:"native",tab_id:"native:t1",label:($id + " · worker"),focused:false}
         ]
       | .panes = [
-          {workspace_id:"native",tab_id:"native:t0",pane_id:"native:p0",label:"",cwd:$root,foreground_cwd:$root},
+          {workspace_id:"native",tab_id:"native:t0",pane_id:"native:p0",label:$primary_pane_label,cwd:$root,foreground_cwd:$root},
           {workspace_id:"native",tab_id:"native:t1",pane_id:"native:p1",label:($id + " · worker"),cwd:$project,foreground_cwd:$worktree}
         ]
     '
     meta="$home/state/$id.meta"
     write_full_projected_meta "$meta" "$id" "$project" "$worktree" \
-      native native:t1 native:p1 firstmate "$id · worker"
+      native native:t1 native:p1 "$workspace_label" "$id · worker"
     meta_before=$(cksum < "$meta")
     state_before=$(jq -cS '{workspaces,tabs,panes,agents,pending}' "$state")
-    if [ "$mode" = shared-native ]; then
+    if [ "$mode" != insufficient-native ]; then
       out=$(
         HERDR_ENV=1 HERDR_SOCKET_PATH="$socket" HERDR_WORKSPACE_ID=native \
           HERDR_TAB_ID=native:t0 HERDR_PANE_ID=native:p0 \
@@ -946,6 +966,36 @@ prepare_real_secondmate_publication_crash() {  # <dir> <case-suffix>
     || fail "$suffix parent publication omitted its exact tuple"
 }
 
+prepare_real_secondmate_parent_republication_failure() {  # <dir> <case-suffix>
+  local dir=$1 suffix=$2 out status recovery_start recovery_calls parent_fail_path
+  prepare_real_secondmate_publication_crash "$dir" "$suffix"
+  SM_PARENT_BEFORE="$dir/parent.before"
+  SM_PARENT_FAIL_MARKER="$dir/parent-republication-failed"
+  cp "$SM_PARENT" "$SM_PARENT_BEFORE"
+  recovery_start=$(wc -l < "$SM_LOG" | tr -d '[:space:]')
+  parent_fail_path="$(cd "$(dirname "$SM_PARENT")" && pwd -P)/.herdr-parent.meta"
+  out=$(run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+    "$SM_FAKE" "$SM_STATE" "$SM_LOG" "$parent_fail_path" "$SM_PARENT_FAIL_MARKER" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "$suffix parent-republication fault reported spawn success: $out; log=$(tail -20 "$SM_LOG")"
+  [ -s "$SM_PARENT_FAIL_MARKER" ] || fail "$suffix fault did not reach parent republishing"
+  SM_FAILED_REPLACEMENT_PANE=$(cat "$SM_PARENT_FAIL_MARKER")
+  cmp -s "$SM_PARENT_BEFORE" "$SM_PARENT" \
+    || fail "$suffix ordinary parent rename failure changed the old parent record"
+  recovery_calls=$(sed -n "$((recovery_start + 1)),\$p" "$SM_LOG")
+  assert_contains "$recovery_calls" "tab"$'\037'"close"$'\037'"$SM_OLD_TAB" \
+    "$suffix recovery did not close its exact old husk after replacement creation"
+  assert_contains "$recovery_calls" "pane"$'\037'"close"$'\037'"$SM_FAILED_REPLACEMENT_PANE" \
+    "$suffix parent rename failure did not roll back its response-derived replacement pane"
+  assert_not_contains "$recovery_calls" $'pane\037send-text' \
+    "$suffix parent rename failure launched an agent"
+  jq -e --arg old "$SM_OLD_PANE" --arg failed "$SM_FAILED_REPLACEMENT_PANE" '
+    ([.panes[] | select(.pane_id == $old)] | length) == 0
+    and ([.panes[] | select(.pane_id == $failed)] | length) == 0
+  ' "$SM_STATE" >/dev/null \
+    || fail "$suffix parent rename failure left an old or replacement pane live"
+}
+
 # Fault after the real child-home parent publication and before the primary
 # publication, then retry the same full spawn. Only the exact one-pane,
 # no-agent husk may be replaced, and both records must converge on the new tuple.
@@ -977,6 +1027,111 @@ test_real_secondmate_publication_crash_retry() {
     and ([.panes[] | select(.pane_id == $new)] | length) == 1
   ' "$SM_STATE" >/dev/null || fail "second-mate retry did not leave exactly the replacement pane"
   pass "Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk"
+}
+
+# A validated parent record may also recover a repeatedly absent old tab or
+# pane inside its exact owned workspace. Neither path closes or otherwise
+# mutates the absent old endpoint, and both records publish the new tuple.
+test_real_secondmate_parent_missing_tab_and_pane_recovery() {
+  local mode dir retry_start retry_calls current_workspace current_pane
+  for mode in missing-tab missing-pane; do
+    dir="$TMP_ROOT/full-secondmate-parent-$mode"
+    prepare_real_secondmate_publication_crash "$dir" "${mode//-/_}"
+    if [ "$mode" = missing-tab ]; then
+      # shellcheck disable=SC2016  # jq variables, not shell expansion
+      state_update "$SM_STATE" --arg workspace "$SM_OLD_WORKSPACE" \
+        --arg old_tab "$SM_OLD_TAB" --arg old_pane "$SM_OLD_PANE" --arg home "$SM_CHILD" '
+        .tabs |= map(select(.tab_id != $old_tab))
+        | .panes |= map(select(.pane_id != $old_pane))
+        | .agents |= del(.[$old_pane])
+        | .tabs += [{workspace_id:$workspace,tab_id:"anchor:t1",label:"anchor · worker",focused:true}]
+        | .panes += [{workspace_id:$workspace,tab_id:"anchor:t1",pane_id:"anchor:p1",label:"anchor · worker",cwd:$home,foreground_cwd:$home}]
+        | (.workspaces[] | select(.workspace_id == $workspace) | .active_tab_id) = "anchor:t1"
+      '
+    else
+      # shellcheck disable=SC2016  # jq variables, not shell expansion
+      state_update "$SM_STATE" --arg old_pane "$SM_OLD_PANE" '
+        .panes |= map(select(.pane_id != $old_pane))
+        | .agents |= del(.[$old_pane])
+      '
+    fi
+    retry_start=$(wc -l < "$SM_LOG" | tr -d '[:space:]')
+    run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+      "$SM_FAKE" "$SM_STATE" "$SM_LOG" > "$dir/retry.out" 2> "$dir/retry.err" \
+      || fail "$mode parent recovery failed: $(cat "$dir/retry.err")"
+    current_workspace=$(grep '^herdr_workspace_id=' "$SM_PUBLIC" | cut -d= -f2-)
+    current_pane=$(grep '^herdr_pane_id=' "$SM_PUBLIC" | cut -d= -f2-)
+    [ "$current_workspace" = "$SM_OLD_WORKSPACE" ] \
+      || fail "$mode recovery did not reuse its exact owned workspace"
+    [ "$(grep '^herdr_workspace_id=' "$SM_PARENT")" = "herdr_workspace_id=$current_workspace" ] \
+      && [ "$(grep '^herdr_pane_id=' "$SM_PARENT")" = "herdr_pane_id=$current_pane" ] \
+      || fail "$mode recovery parent and primary records diverged"
+    retry_calls=$(sed -n "$((retry_start + 1)),\$p" "$SM_LOG")
+    assert_not_contains "$retry_calls" "tab"$'\037'"close"$'\037'"$SM_OLD_TAB" \
+      "$mode recovery closed the old tab"
+    assert_not_contains "$retry_calls" "pane"$'\037'"close"$'\037'"$SM_OLD_PANE" \
+      "$mode recovery tried to close the absent old pane"
+    [ "$(printf '%s\n' "$retry_calls" | grep -c $'^tab\037create\037' || true)" = 1 ] \
+      || fail "$mode recovery did not create exactly one replacement task tab"
+    [ "$(printf '%s\n' "$retry_calls" | grep -F -c "sh -c 'true'" || true)" = 1 ] \
+      || fail "$mode recovery did not launch exactly once"
+  done
+  pass "Herdr full spawn: missing parent tab or pane recovers only in the exact owned workspace"
+}
+
+# A recovery replacement can close the old husk and then fail its ordinary
+# same-directory parent rename. That failed replacement rolls back while the
+# old record stays byte-identical, and a third same-id spawn recreates from the
+# repeatedly absent old tuple into one response-owned current workspace.
+test_real_secondmate_parent_republication_failure_third_retry() {
+  local dir third_start third_calls current_workspace current_pane launch_count
+  dir="$TMP_ROOT/full-secondmate-parent-republication"
+  prepare_real_secondmate_parent_republication_failure "$dir" parent_republication
+  [ ! -e "$SM_PUBLIC" ] && [ ! -L "$SM_PUBLIC" ] \
+    || fail "parent-republication failure published primary metadata"
+
+  third_start=$(wc -l < "$SM_LOG" | tr -d '[:space:]')
+  run_real_secondmate_spawn "$SM_ID" "$SM_PRIMARY" "$SM_CHILD" \
+    "$SM_FAKE" "$SM_STATE" "$SM_LOG" > "$dir/third.out" 2> "$dir/third.err" \
+    || fail "third same-id second-mate spawn did not recover the absent old tuple: $(cat "$dir/third.err"); log=$(tail -40 "$SM_LOG"); state=$(cat "$SM_STATE"); parent=$(cat "$SM_PARENT"); mode=$(stat -f '%Lp' "$SM_PARENT" 2>/dev/null || stat -c '%a' "$SM_PARENT")"
+  [ -f "$SM_PARENT" ] && [ ! -L "$SM_PARENT" ] \
+    && [ -f "$SM_PUBLIC" ] && [ ! -L "$SM_PUBLIC" ] \
+    || fail "third retry did not publish one regular parent and primary record"
+  [ "$(find "$SM_CHILD/state" -maxdepth 1 -name '.herdr-parent.meta' -type f | wc -l | tr -d '[:space:]')" = 1 ] \
+    && [ "$(find "$SM_PRIMARY/state" -maxdepth 1 -name "$SM_ID.meta" -type f | wc -l | tr -d '[:space:]')" = 1 ] \
+    || fail "third retry published duplicate parent or primary records"
+  FM_HOME="$SM_CHILD" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_validate_recovery "$1" "$2" "$3" "$3" "$3" fmtest
+  ' "$ROOT" "$SM_PARENT" "$SM_ID" "$SM_CHILD" \
+    || fail "third retry parent record failed strict recovery validation"
+  FM_HOME="$SM_CHILD" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    helper=$(sed -n "/^spawn_herdr_secondmate_publications_match()/,/^}/p" "$0/bin/fm-spawn.sh")
+    eval "$helper"
+    spawn_herdr_secondmate_publications_match "$1" "$2" "$3" "$4"
+  ' "$ROOT" "$SM_PUBLIC" "$SM_PARENT" "$SM_ID" "$SM_CHILD" \
+    || fail "third retry parent and primary records do not name one exact tuple"
+  current_workspace=$(grep '^herdr_workspace_id=' "$SM_PUBLIC" | cut -d= -f2-)
+  current_pane=$(grep '^herdr_pane_id=' "$SM_PUBLIC" | cut -d= -f2-)
+  [ -n "$current_workspace" ] && [ "$current_workspace" != "$SM_OLD_WORKSPACE" ] \
+    || fail "stale old workspace id authorized the recreated current container"
+  jq -e --arg workspace "$current_workspace" --arg pane "$current_pane" \
+    --arg old "$SM_OLD_PANE" --arg failed "$SM_FAILED_REPLACEMENT_PANE" \
+    --arg label "$SM_ID · second mate" '
+      (.workspaces | length) == 1
+      and (.tabs | length) == 1
+      and (.panes | length) == 1
+      and ([.panes[]
+            | select(.workspace_id == $workspace and .pane_id == $pane and .label == $label)]
+           | length) == 1
+      and ([.panes[] | select(.pane_id == $old or .pane_id == $failed)] | length) == 0
+    ' "$SM_STATE" >/dev/null \
+    || fail "third retry left a duplicate pane, old husk, failed replacement, or orphan"
+  third_calls=$(sed -n "$((third_start + 1)),\$p" "$SM_LOG")
+  launch_count=$(printf '%s\n' "$third_calls" | grep -F -c "sh -c 'true'" || true)
+  [ "$launch_count" = 1 ] || fail "third retry launched the second mate $launch_count times"
+  pass "Herdr full spawn: parent republish failure rolls back and a third same-id retry converges"
 }
 
 # Fault the real child-home publisher into an unsafe final path after task-pane
@@ -1026,11 +1181,13 @@ test_real_secondmate_unsafe_parent_publication_retry() {
 }
 
 # Recreate the same real parent-first fault, then disconfirm recovery rights for
-# a live agent, wrong identity, symlink record, extra pane, and foreign
-# same-label tab. Every retry must stop before create, rename, close, or launch.
+# a live agent, wrong identity, symlink record, extra pane, foreign same-label
+# tab, changed missing-tab state, and a missing-tab label collision. Every retry
+# must stop before task create, rename, close, or launch.
 test_real_secondmate_parent_recovery_disconfirming_cases() {
   local mode dir retry_start out status retry_calls mutations saved
-  for mode in live-agent wrong-identity symlink extra-pane foreign-same-label; do
+  for mode in live-agent wrong-identity symlink extra-pane foreign-same-label \
+    missing-tab-changed missing-tab-collision; do
     dir="$TMP_ROOT/full-secondmate-$mode"
     prepare_real_secondmate_publication_crash "$dir" "${mode//-/_}"
     case "$mode" in
@@ -1060,6 +1217,32 @@ test_real_secondmate_parent_recovery_disconfirming_cases() {
           --arg label "$SM_ID · second mate" '
           .tabs += [{workspace_id:$workspace,tab_id:"foreign:same-label",label:$label,focused:false}]
           | .panes += [{workspace_id:$workspace,tab_id:"foreign:same-label",pane_id:"foreign:same-label-pane",label:$label,cwd:$home,foreground_cwd:$home}]
+        '
+        ;;
+      missing-tab-changed|missing-tab-collision)
+        # Keep the exact owned workspace alive through an unrelated anchor while
+        # removing the recorded tab and pane before the recovery read.
+        # shellcheck disable=SC2016  # jq variables, not shell expansion
+        state_update "$SM_STATE" --arg workspace "$SM_OLD_WORKSPACE" \
+          --arg old_tab "$SM_OLD_TAB" --arg old_pane "$SM_OLD_PANE" \
+          --arg home "$SM_CHILD" --arg label "$SM_ID · second mate" \
+          --arg mode "$mode" '
+          .tabs |= map(select(.tab_id != $old_tab))
+          | .panes |= map(select(.pane_id != $old_pane))
+          | .agents |= del(.[$old_pane])
+          | .tabs += [{workspace_id:$workspace,tab_id:"anchor:t1",label:"anchor · worker",focused:true}]
+          | .panes += [{workspace_id:$workspace,tab_id:"anchor:t1",pane_id:"anchor:p1",label:"anchor · worker",cwd:$home,foreground_cwd:$home}]
+          | (.workspaces[] | select(.workspace_id == $workspace) | .active_tab_id) = "anchor:t1"
+          | if $mode == "missing-tab-collision" then
+              .tabs += [{workspace_id:$workspace,tab_id:"foreign:same-label",label:$label,focused:false}]
+              | .panes += [{workspace_id:$workspace,tab_id:"foreign:same-label",pane_id:"foreign:same-label-pane",label:$label,cwd:$home,foreground_cwd:$home}]
+            else
+              .faults.restore_parent_on_tab_list = {
+                trigger:4,
+                tab:{workspace_id:$workspace,tab_id:$old_tab,label:$label,focused:false},
+                pane:{workspace_id:$workspace,tab_id:$old_tab,pane_id:$old_pane,label:$label,cwd:$home,foreground_cwd:$home}
+              }
+            end
         '
         ;;
     esac
@@ -1110,16 +1293,18 @@ test_secondmate_parent_only_recovery() {
   write_parent_record "$home" research w1 w1:t1 w1:p1 || fail "could not write parent recovery record"
   log="$dir/log"; : > "$log"; fake=$(make_fake_herdr "$dir")
   write_secondmate_snapshot "$dir" 1 "$home"
-  response "$dir" 6 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"research · second mate"}]}}'
-  response "$dir" 7 '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
-  response "$dir" 8 '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2","label":"research · second mate"}}}'
-  response "$dir" 9 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":"research · second mate"}}}'
-  write_secondmate_snapshot "$dir" 10 "$home"
-  response "$dir" 15 '{}'
-  response "$dir" 16 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","label":"research · second mate"}]}}'
+  response "$dir" 5 '{"result":{"workspaces":[{"workspace_id":"w1","label":"research · second mate"}]}}'
+  response "$dir" 6 '{"error":{"code":"agent_not_found"}}'
+  response "$dir" 7 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t1","label":"research · second mate"}]}}'
+  response "$dir" 8 '{"result":{"tab":{"tab_id":"w1:t2"},"root_pane":{"pane_id":"w1:p2"}}}'
+  response "$dir" 9 '{"result":{"tab":{"workspace_id":"w1","tab_id":"w1:t2","label":"research · second mate"}}}'
+  response "$dir" 10 '{"result":{"pane":{"workspace_id":"w1","tab_id":"w1:t2","pane_id":"w1:p2","label":"research · second mate"}}}'
+  write_secondmate_snapshot "$dir" 11 "$home"
+  response "$dir" 16 '{}'
+  response "$dir" 17 '{"result":{"tabs":[{"workspace_id":"w1","tab_id":"w1:t2","label":"research · second mate"}]}}'
   out=$(run_adapter "$home" "$fake" "$log" fm_backend_herdr_create_task \
     fmtest:w1 research secondmate "$home" '' '' "$parent" "$parent") \
-    || fail "parent-only second-mate recovery failed: $out"
+    || fail "parent-only second-mate recovery failed: $out; calls=$(cat "$log")"
   [ "$out" = 'w1:t2 w1:p2' ] || fail "parent-only recovery returned '$out'"
   [ "$(grep '^herdr_tab_id=' "$parent")" = herdr_tab_id=w1:t2 ] \
     && [ "$(grep '^herdr_pane_id=' "$parent")" = herdr_pane_id=w1:p2 ] \
@@ -1364,6 +1549,8 @@ test_real_spawn_projection_fallback_and_reclaim_refusals
 test_real_spawn_exact_journal_parent_refusals
 test_real_flat_publication_failure_cleanup_retry
 test_real_secondmate_publication_crash_retry
+test_real_secondmate_parent_missing_tab_and_pane_recovery
+test_real_secondmate_parent_republication_failure_third_retry
 test_real_secondmate_unsafe_parent_publication_retry
 test_real_secondmate_parent_recovery_disconfirming_cases
 test_v1_flat_fallback_excludes_projected_child
