@@ -1,7 +1,8 @@
 # Herdr runtime backend
 
 Herdr is an experimental agent-native terminal backend with native per-pane agent state and push events.
-Firstmate requires Herdr protocol 14 or newer; versions 0.7.1, 0.7.3, 0.7.4, and 0.7.5 are verified, with protocol-16 features enabled only when available.
+Firstmate requires Herdr protocol 14 or newer and enables protocol-16 features only when available.
+The latest active verification uses Herdr 0.7.5, while [`verification/runtime-backends.md`](verification/runtime-backends.md#herdr) retains older-version evidence only where it defines current behavior or fallbacks.
 Herdr provides the terminal session while Treehouse continues to provide task worktrees.
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns shared backend selection and metadata semantics.
 
@@ -62,7 +63,7 @@ An older secondmate workspace using `firstmate-<id>` is not migrated automatical
 Existing task operations use recorded endpoint ids and do not move a live task when labels change.
 Herdr scout-to-ship promotion is the one supported role transition: it keeps a durable exact-ID intent, converges the recorded tab and pane forward from scout to worker, updates a matching presentation journal when present, and replaces the Herdr record as one complete file.
 Herdr cleanup refuses while that intent remains unresolved; synthetic and other runtime records ignore the Herdr-only sentinel.
-The per-home workspace is reused while it has task tabs.
+Each primary-project or secondmate-home workspace is reused while it has task tabs.
 Closing its last tab can remove the workspace, and the next spawn recreates it.
 
 ## Optional presentation spaces
@@ -79,7 +80,7 @@ After the new workspace converges to one exact task endpoint beneath one exact p
 Version 2 remains a read-compatible legacy binding with `fm-<id>` as its required task label and migrates only through exact same-identity replacement or role transition.
 The token is visible in the workspace title because Herdr exposes no verified hidden persistent field, but neither token, title, nor journal authorizes send, capture, task ownership, Treehouse return, or general recovery.
 
-The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
+The ordinary readable-role task tab is created in the exact new workspace returned by Herdr.
 Only the exact seeded default tab returned by the same workspace-create response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
@@ -125,7 +126,7 @@ Firstmate immediately revalidates the same journal, metadata absence, workspace 
 It closes only that pane, never a workspace.
 The matching journal is retired only after the exact pane is positively confirmed gone; an unconfirmed close retains the journal, while a confirmed close may retire it even when focus restoration reported an error after the close.
 A second run finds no matching title or journal and is a no-op.
-A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 binding, current metadata, registered or unknown agent, extra tab or pane, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
+A malformed or missing title or token, duplicate token, zero or multiple journal matches, cross-home version 2 or version 3 binding, current metadata, registered or unknown agent, extra tab or pane, active target, busy lock, changed revalidation, unreadable check, or any error preserves the candidate and lets session startup continue with at most a concise warning.
 
 Operational compromises:
 
@@ -140,7 +141,7 @@ Operational compromises:
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
-`tests/fm-spawn-herdr-recovery.test.sh` covers the real spawn entry point with a fake Herdr command for native/project separation, flat fallback, exact journal-parent refusal, and second-mate publication-crash recovery.
+`tests/fm-spawn-herdr-recovery.test.sh` covers the real spawn entry point with a fake Herdr command for native/project separation, flat fallback, exact journal-parent refusal, ordinary flat-publication rollback and same-id retry, and second-mate publication failure or crash recovery.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab; [`verification/runtime-backends.md`](verification/runtime-backends.md#per-home-and-presentation-topology) owns the active versioned evidence.
 
@@ -161,7 +162,7 @@ The current structural gate removes label inference from cleanup authority.
 
 [`configuration.md`](configuration.md#runtime-backend-configbackend--fm_backend) owns the complete Herdr task and second-mate parent field schema, legacy optional fields, uniqueness, bounds, and non-routing meaning.
 The recorded pane remains the operational fast path, while workspace and tab ids support exact verification and cleanup.
-Herdr task and parent publication gives readers complete-record-or-none visibility; the exact private-file, validation, rename, and cleanup steps live in the relevant script headers.
+With the system same-directory rename, Herdr task and parent publication gives readers a complete prior or new record; the exact validation, post-rename refusal, cleanup, and substituted-rename limit live in the relevant script headers.
 A crash after second-mate parent publication but before primary task publication can recover only the exact one-pane, no-agent husk named by the validated child-home parent record, after which both records must publish one identical tuple before launch.
 
 For Herdr records, session start, fleet JSON, fleet view, crew state, send errors, and interactive peek place the readable label before the machine target.

@@ -456,7 +456,7 @@ EOF
 }
 
 test_teardown_refuses_unresolved_intent() {
-  local dir home fake out status non_herdr
+  local dir home fake out status non_herdr order meta intent cleanup_log
   IFS=$'\t' read -r dir home fake <<EOF
 $(setup_flat teardown-intent)
 EOF
@@ -469,6 +469,42 @@ EOF
   [ "$status" -ne 0 ] || fail "teardown accepted an unresolved role-transition intent"
   assert_contains "$out" 'unresolved Herdr role transition' "teardown refusal did not explain the role transition"
   [ -f "$home/state/invoice-check.meta" ] || fail "teardown removed metadata despite unresolved intent"
+
+  for order in herdr-first herdr-last; do
+    IFS=$'\t' read -r dir home fake <<EOF
+$(setup_flat "teardown-duplicate-$order")
+EOF
+    meta="$home/state/invoice-check.meta"
+    intent="$home/state/invoice-check.herdr-role-transition"
+    perl -pi -e 's/^kind=scout$/kind=ship/' "$meta"
+    if [ "$order" = herdr-first ]; then
+      printf 'backend=fixture\n' >> "$meta"
+    else
+      perl -pi -e 's/^backend=herdr$/backend=fixture\nbackend=herdr/' "$meta"
+    fi
+    printf 'unresolved\n' > "$intent"
+    cp "$meta" "$dir/meta.before"
+    cp "$intent" "$dir/intent.before"
+    cleanup_log="$dir/cleanup.log"
+    : > "$cleanup_log"
+    cat > "$fake/treehouse" <<'SH'
+#!/usr/bin/env bash
+printf 'treehouse cleanup\n' >> "${FM_CLEANUP_LOG:?}"
+exit 0
+SH
+    chmod +x "$fake/treehouse"
+    out=$(PATH="$fake:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+      FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
+      FM_HERDR_STATE="$dir/herdr" FM_HERDR_LOG="$dir/herdr.log" \
+      FM_CLEANUP_LOG="$cleanup_log" "$ROOT/bin/fm-teardown.sh" invoice-check --force 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "$order duplicate backend fields bypassed Herdr transition refusal"
+    cmp -s "$dir/meta.before" "$meta" || fail "$order refusal changed or removed metadata"
+    cmp -s "$dir/intent.before" "$intent" || fail "$order refusal changed or removed transition intent"
+    [ -d "$home/worktree" ] || fail "$order refusal removed the worktree"
+    [ ! -s "$dir/herdr.log" ] || fail "$order refusal called endpoint cleanup"
+    [ ! -s "$cleanup_log" ] || fail "$order refusal called worktree cleanup"
+  done
 
   non_herdr="$TMP_ROOT/teardown-non-herdr"; mkdir -p "$non_herdr/state" "$non_herdr/data" "$non_herdr/config"
   printf '%s\n' 'window=fixture-target' 'worktree=/missing/worktree' 'project=/missing/project' \

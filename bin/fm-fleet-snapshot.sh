@@ -196,8 +196,19 @@ last_nonempty_line() {  # <file>
   grep -v '^[[:space:]]*$' "$1" 2>/dev/null | tail -1
 }
 
+crew_state_meta_is_exact_herdr() {  # <id>
+  local meta="$STATE/$1.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(grep -c '^backend=herdr$' "$meta" 2>/dev/null || true)" = 1 ] \
+    && [ "$(grep -c '^backend=' "$meta" 2>/dev/null || true)" = 1 ] || return 1
+  fm_backend_source herdr >/dev/null 2>&1 || return 1
+  fm_backend_herdr_metadata_validate_record "$meta" >/dev/null 2>&1
+}
+
 crew_state_json() {  # <id>
   local id=$1 raw rest state source detail display_rest display_label display_target sep display_marker
+  local exact_herdr=0
+  crew_state_meta_is_exact_herdr "$id" && exact_herdr=1
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -221,19 +232,21 @@ crew_state_json() {  # <id>
         *"$sep"*)
           source=${rest%%"$sep"*}
           detail=${rest#*"$sep"}
-          display_marker="${sep}target: "
-          case "$detail" in
-            label:\ *"$display_marker"*"$sep"*)
-              display_rest=${detail#label: }
-              display_label=${display_rest%%"$display_marker"*}
-              display_rest=${display_rest#*"$display_marker"}
-              display_target=${display_rest%%"$sep"*}
-              if [ -n "$display_label" ] && [ -n "$display_target" ] \
-                 && [ "$display_rest" != "$display_target" ]; then
-                detail=${display_rest#*"$sep"}
-              fi
-              ;;
-          esac
+          if [ "$exact_herdr" = 1 ]; then
+            display_marker="${sep}target: "
+            case "$detail" in
+              label:\ *"$display_marker"*"$sep"*)
+                display_rest=${detail#label: }
+                display_label=${display_rest%%"$display_marker"*}
+                display_rest=${display_rest#*"$display_marker"}
+                display_target=${display_rest%%"$sep"*}
+                if [ -n "$display_label" ] && [ -n "$display_target" ] \
+                   && [ "$display_rest" != "$display_target" ]; then
+                  detail=${display_rest#*"$sep"}
+                fi
+                ;;
+            esac
+          fi
           ;;
         *) source=$rest ;;
       esac

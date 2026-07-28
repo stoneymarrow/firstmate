@@ -173,20 +173,25 @@ SH
 # Malformed optional display grammar stays in detail rather than losing bytes;
 # an unknown line keeps its raw fallback and unknown state fields.
 test_fleet_state_detail_malformed_fallback() {
-  local helper root raw parsed
-  helper=$(sed -n '/^crew_state_json()/,/^}/p' "$ROOT/bin/fm-fleet-snapshot.sh")
-  [ -n "$helper" ] || fail "fleet state parser function is missing"
-  root="$TMP_ROOT/state-parser-root"; mkdir -p "$root/bin"
+  local helper root raw parsed meta
+  helper=$(sed -n '/^crew_state_meta_is_exact_herdr()/,/^status_event_json()/p' \
+    "$ROOT/bin/fm-fleet-snapshot.sh" | sed '$d')
+  [ -n "$helper" ] || fail "fleet state parser functions are missing"
+  root="$TMP_ROOT/state-parser-root"; mkdir -p "$root/bin" "$root/state"
+  meta="$root/state/fixture.meta"
   cat > "$root/bin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$FM_TEST_CREW_RAW"
 SH
   chmod +x "$root/bin/fm-crew-state.sh"
+  printf '%s\n' 'backend=herdr' 'herdr_session=shared' 'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t1' 'herdr_pane_id=w1:p1' > "$meta"
   raw='state: paused · source: status-log · label:  · target: shared:w1:p1 · waiting for filing'
-  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" \
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
     bash -c '
-      FM_ROOT=$FM_TEST_ROOT; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT
+      FM_ROOT=$FM_TEST_REPO; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT/state
       DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      . "$FM_TEST_REPO/bin/fm-backend.sh"
       SCRIPT_DIR=$FM_TEST_ROOT/bin
       eval "$FM_TEST_HELPER"
       crew_state_json fixture
@@ -194,11 +199,42 @@ SH
   [ "$(printf '%s' "$parsed" | jq -r '.detail')" = \
     'label:  · target: shared:w1:p1 · waiting for filing' ] \
     || fail "malformed display fields were stripped from fallback detail"
-  raw='unexpected crew state bytes'
-  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" \
+
+  printf '%s\n' 'window=fixture-target' 'backend=fixture' > "$meta"
+  raw='state: paused · source: status-log · label: customer · target: quarter · waiting'
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
     bash -c '
-      FM_ROOT=$FM_TEST_ROOT; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT
+      FM_ROOT=$FM_TEST_REPO; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT/state
       DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      . "$FM_TEST_REPO/bin/fm-backend.sh"
+      SCRIPT_DIR=$FM_TEST_ROOT/bin
+      eval "$FM_TEST_HELPER"
+      crew_state_json fixture
+    ') || fail "non-Herdr display-shaped detail fixture failed"
+  [ "$(printf '%s' "$parsed" | jq -r '.detail')" = \
+    'label: customer · target: quarter · waiting' ] \
+    || fail "non-Herdr display-shaped detail lost bytes"
+
+  printf '%s\n' 'backend=herdr' 'herdr_session=shared' > "$meta"
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
+    bash -c '
+      FM_ROOT=$FM_TEST_REPO; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT/state
+      DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      . "$FM_TEST_REPO/bin/fm-backend.sh"
+      SCRIPT_DIR=$FM_TEST_ROOT/bin
+      eval "$FM_TEST_HELPER"
+      crew_state_json fixture
+    ') || fail "malformed Herdr display-shaped detail fixture failed"
+  [ "$(printf '%s' "$parsed" | jq -r '.detail')" = \
+    'label: customer · target: quarter · waiting' ] \
+    || fail "malformed Herdr metadata authorized display-prefix stripping"
+
+  raw='unexpected crew state bytes'
+  parsed=$(FM_TEST_HELPER="$helper" FM_TEST_CREW_RAW="$raw" FM_TEST_ROOT="$root" FM_TEST_REPO="$ROOT" \
+    bash -c '
+      FM_ROOT=$FM_TEST_REPO; FM_HOME=$FM_TEST_ROOT; STATE=$FM_TEST_ROOT/state
+      DATA=$FM_TEST_ROOT; PROJECTS=$FM_TEST_ROOT; CONFIG=$FM_TEST_ROOT
+      . "$FM_TEST_REPO/bin/fm-backend.sh"
       SCRIPT_DIR=$FM_TEST_ROOT/bin
       eval "$FM_TEST_HELPER"
       crew_state_json fixture
@@ -206,7 +242,7 @@ SH
   printf '%s' "$parsed" | jq -e \
     '.state == "unknown" and .source == "none" and .detail == "" and .raw == "unexpected crew state bytes"' \
     >/dev/null || fail "unknown state line changed its legacy fallback fields"
-  pass "Herdr display: malformed and unknown crew-state shapes keep fallback bytes"
+  pass "Herdr display: malformed, non-Herdr, and unknown crew-state shapes keep fallback bytes"
 }
 
 # Crew state keeps the leading state/source grammar and puts label then target
@@ -282,7 +318,9 @@ test_peek_display_and_raw_pipe() {
 # The extracted spawn publisher is exercised with a blocking PATH-injected mv.
 # A concurrent reader sees only the old complete record until rename, then the
 # complete fresh-spawn candidate. Unsafe destinations, incomplete schema,
-# validation/rename failure, and a false-success rename cannot report publish.
+# validation or ordinary rename failure, and a false-success rename cannot
+# report publish. A copy-and-lie substitute may change public bytes before the
+# verifier refuses, so this fixture does not claim rollback against it.
 test_atomic_metadata_publication_behavior() {
   local dir fake helper public candidate old_bytes pid out status source symlink_target
   dir="$TMP_ROOT/atomic-publication"; fake="$dir/bin"; mkdir -p "$fake" "$dir/state"
@@ -300,6 +338,10 @@ case "${FM_TEST_MV_MODE:-pass}" in
     ;;
   fail) exit 1 ;;
   noop) exit 0 ;;
+  copy)
+    /bin/cp "${2:-}" "${3:-}"
+    exit 0
+    ;;
   symlink)
     candidate=${2:-}
     public=${3:-}
@@ -423,6 +465,16 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "injected rename failure reported publication success"
   [ "$(cat "$public")" = 'old=complete' ] || fail "rename failure changed public metadata"
+
+  write_complete_candidate
+  out=$(PATH="$fake:$PATH" FM_HOME="$HOME_DIR" FM_TEST_MV_MODE=copy \
+    FM_TEST_HELPER="$helper" FM_TEST_CANDIDATE="$candidate" FM_TEST_PUBLIC="$public" \
+    bash -c '. "$0/bin/backends/herdr.sh"; eval "$FM_TEST_HELPER"; spawn_herdr_metadata_publish "$FM_TEST_CANDIDATE" "$FM_TEST_PUBLIC"' "$ROOT" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "copy-and-lie rename reported publication success"
+  [ -f "$candidate" ] || fail "copy-and-lie fixture did not retain its candidate"
+  [ "$(head -1 "$public")" = 'window=shared:w1:p1' ] \
+    || fail "copy-and-lie fixture did not demonstrate changed public bytes"
 
   rm -f "$public"
   write_complete_candidate

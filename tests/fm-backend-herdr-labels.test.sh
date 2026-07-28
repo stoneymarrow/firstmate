@@ -685,6 +685,7 @@ test_native_primary_and_firstmate_project_are_distinct() {
 test_session_display_alias_metadata() {
   local home meta parent out
   home="$TMP_ROOT/session-alias/home"; mkdir -p "$home/state"
+  printf 'research\n' > "$home/.fm-secondmate-home"
   meta="$home/state/alias.meta"
   metadata "$meta" ship /srv/payments w1 w1:t1 w1:p1
   printf 'herdr_session_display_label=Shared Herdr session\n' >> "$meta"
@@ -710,6 +711,93 @@ test_session_display_alias_metadata() {
     || fail "second-mate parent metadata omitted the honest session alias"
   [ ! -e "$home/state/.herdr-parent.meta.tmp.$$" ] || fail "parent metadata left a predictable temporary file"
   pass "Herdr metadata: native-session alias is exact, display-only, and parent-published"
+}
+
+# The child-home parent publisher accepts only its complete exact schema and
+# verifies both sides of the same-directory rename without trusting its exit.
+test_parent_metadata_publication_safety() {
+  local dir home fake parent target truncated out status nested leftovers
+  dir="$TMP_ROOT/parent-publication"; home="$dir/home"; fake="$dir/bin"
+  mkdir -p "$home/state" "$fake"
+  printf 'research\n' > "$home/.fm-secondmate-home"
+  parent="$home/state/.herdr-parent.meta"
+  target="$dir/symlink-target"
+  printf 'target bytes\n' > "$target"
+  cat > "$fake/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${FM_TEST_MV_MODE:-pass}" in
+  noop) exit 0 ;;
+  symlink)
+    /bin/rm -f "${2:-}" "${3:-}"
+    /bin/ln -s "$FM_TEST_MV_TARGET" "${3:-}"
+    ;;
+  *) exec /bin/mv "$@" ;;
+esac
+SH
+  chmod +x "$fake/mv"
+
+  PATH="$fake:$PATH" FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$parent" "$home" || fail "absent parent destination was refused"
+  [ -f "$parent" ] && [ ! -L "$parent" ] || fail "absent parent destination did not publish a regular file"
+  [ "$(wc -l < "$parent" | tr -d '[:space:]')" = 15 ] || fail "published parent schema is not 15 fields"
+
+  truncated="$dir/truncated.meta"
+  head -n 14 "$parent" > "$truncated"
+  chmod 0600 "$truncated"
+  if FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_validate_publish "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$truncated" "$home" >/dev/null 2>&1; then
+    fail "truncated parent candidate passed complete-schema validation"
+  fi
+
+  rm -f "$parent"
+  mkdir "$parent"
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$parent" "$home" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "directory parent destination was accepted"
+  nested=$(find "$parent" -type f | wc -l | tr -d '[:space:]')
+  [ "$nested" = 0 ] || fail "directory refusal moved a candidate inside the destination"
+  rmdir "$parent"
+
+  ln -s "$target" "$parent"
+  out=$(PATH="$fake:$PATH" FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$parent" "$home" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "symlink parent destination was accepted"
+  [ -L "$parent" ] && [ "$(cat "$target")" = 'target bytes' ] || fail "symlink refusal changed either path"
+  rm -f "$parent"
+
+  out=$(PATH="$fake:$PATH" FM_TEST_MV_MODE=noop FM_HOME="$home" bash -c '
+    . "$0/bin/backends/herdr.sh"
+    fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+      "research · second mate" "research · second mate"
+  ' "$ROOT" "$parent" "$home" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "false-success no-op parent rename was accepted"
+  [ ! -e "$parent" ] && [ ! -L "$parent" ] || fail "no-op parent rename created a public path"
+  leftovers=$(find "$home/state" -maxdepth 1 -name '.herdr-parent.meta.*' -type f | wc -l | tr -d '[:space:]')
+  [ "$leftovers" = 0 ] || fail "no-op parent rename left a private candidate"
+
+  out=$(PATH="$fake:$PATH" FM_TEST_MV_MODE=symlink FM_TEST_MV_TARGET="$target" \
+    FM_HOME="$home" bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_parent_metadata_write "$1" research "$2" fmtest w2 w2:t2 w2:p2 \
+        "research · second mate" "research · second mate"
+    ' "$ROOT" "$parent" "$home" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "unsafe final parent path was accepted"
+  [ -L "$parent" ] || fail "unsafe-final fixture did not leave the injected symlink"
+  rm -f "$parent"
+  pass "Herdr parent publication: complete schema refuses unsafe and false-success destinations"
 }
 
 # The private metadata-free fallback scans every running session and never
@@ -770,6 +858,7 @@ test_bare_selector_global_uniqueness() {
 
 test_native_primary_and_firstmate_project_are_distinct
 test_session_display_alias_metadata
+test_parent_metadata_publication_safety
 test_bare_selector_global_uniqueness
 test_projection_journal_versions_and_readable_binding
 test_projection_create_renames_and_verifies_both_labels

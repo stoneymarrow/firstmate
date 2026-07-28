@@ -166,16 +166,18 @@ ok - Herdr bare selector: one exact global tab succeeds; duplicates and multi-pa
 ok - Herdr session lock: globally unique physical sockets own lock identity
 ok - Herdr spawn recovery: v1 flat fallback excludes the projected child
 ok - Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent
-ok - Herdr spawn recovery: parent-only second mate replaces one exact no-agent husk
+ok - Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk
+ok - Herdr full spawn: unsafe parent publication rolls back its exact pane and same-id retry succeeds
+ok - Herdr full spawn: flat metadata publication failure rolls back its exact pane and same-id retry succeeds
 ok - Herdr display: fleet snapshot keeps schema/target and fleet view renders labels first
 ok - Display isolation: synthetic non-Herdr state and snapshot output remain unchanged
-ok - Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures
+ok - Herdr metadata: complete-schema atomic publication refuses unsafe and unverifiable public paths
 ok - Herdr promotion: partial tab/pane failure retains intent and retry converges forward
 ok - Herdr teardown: transition refusal applies only to validated Herdr metadata
 ok - Promotion compatibility: generic bytes stay legacy while malformed Herdr claims refuse
 ```
 
-The fixtures prove separate native-primary and project roles, exact legacy-label corroboration, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, exact-ID response verification, label-first rendering, state-detail parsing, routing byte preservation, behavioral complete-record visibility, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
+The fixtures prove separate native-primary and project roles, exact legacy-label corroboration, globally unique physical-socket locks, duplicate bare-selector identity refusal, lawful v1 and v2/v3 flat-parent selection, parent-only second-mate husk recovery, response-pane rollback and same-id retry after task or parent publication failure, exact-ID response verification, label-first rendering, backend-scoped state-detail parsing, routing byte preservation, system-rename complete-record visibility with explicit refusal after a substituted rename lies, Herdr-only promotion and cleanup boundaries, and recoverable scout-to-ship relabeling.
 They do not prove that the current live primary, worker, or second mate has been renamed.
 
 The guarded current-live proof remains pending because this implementation lane had no authority to touch live Herdr state.

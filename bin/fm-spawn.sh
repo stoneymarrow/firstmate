@@ -241,6 +241,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_FLAT_ABORT_CLEANUP=0
+HERDR_FLAT_ABORT_SESSION=
+HERDR_FLAT_ABORT_TASK_PANE=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 HERDR_META_TEMP=
@@ -328,8 +331,10 @@ spawn_herdr_metadata_validate_fresh_spawn() {  # <metadata-file>
 # absent path is allowed. Complete producer-schema validation precedes one
 # same-directory rename. The final path must be a regular non-symlink file with
 # the exact candidate checksum, and the private name must be gone. Validation
-# and rename failures therefore preserve an absent path or the prior complete
-# record. Candidate creation and trap cleanup remain owned by the caller.
+# and an ordinary failing system rename preserve an absent path or the prior
+# complete record. A substituted rename program can change public bytes before
+# lying about success; final verification refuses that result but cannot roll
+# it back. Candidate creation and trap cleanup remain owned by the caller.
 # Non-Herdr publication never calls this helper.
 spawn_herdr_metadata_publish() {  # <private-candidate> <public-path>
   local candidate=$1 public=$2 candidate_dir public_dir candidate_real public_real candidate_sum public_sum
@@ -390,6 +395,15 @@ spawn_abort_cleanup() {
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
       "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+  fi
+  if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+    HERDR_FLAT_ABORT_CLEANUP=0
+    if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
+      fm_backend_herdr_new_pane_rollback \
+        "$HERDR_FLAT_ABORT_SESSION" "$HERDR_FLAT_ABORT_TASK_PANE"
+    else
+      echo "warning: herdr flat-task session lock was lost; refusing abort cleanup without mutation authority" >&2
+    fi
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -1337,7 +1351,13 @@ case "$BACKEND" in
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
-      spawn_herdr_presentation_order_lock_release
+      if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+        HERDR_FLAT_ABORT_CLEANUP=1
+        HERDR_FLAT_ABORT_SESSION=$HERDR_SES
+        HERDR_FLAT_ABORT_TASK_PANE=$HERDR_PANE_ID
+      else
+        spawn_herdr_presentation_order_lock_release
+      fi
     fi
     if [ -z "$HERDR_TAB_ID" ] || [ -z "$HERDR_PANE_ID" ]; then
       echo "error: herdr did not return a tab/pane id for $W" >&2
@@ -1736,6 +1756,10 @@ fi
 if [ "$BACKEND" = herdr ]; then
   spawn_herdr_metadata_publish "$HERDR_META_TEMP" "$STATE/$ID.meta" || exit 1
   HERDR_META_TEMP=
+  if [ "$HERDR_FLAT_ABORT_CLEANUP" = 1 ]; then
+    HERDR_FLAT_ABORT_CLEANUP=0
+    spawn_herdr_presentation_order_lock_release
+  fi
   if [ "$KIND" = secondmate ]; then
     FM_HOME="$HERDR_LABEL_HOME" spawn_herdr_secondmate_publications_match \
       "$STATE/$ID.meta" "$HERDR_PARENT_META_OUTPUT" "$ID" "$PROJ_ABS" || {

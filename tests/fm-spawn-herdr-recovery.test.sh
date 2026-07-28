@@ -272,13 +272,22 @@ SH
   cat > "$dir/bin/mv" <<'SH'
 #!/usr/bin/env bash
 set -u
-destination=
-for arg in "$@"; do destination=$arg; done
+candidate=${2:-}
+destination=${3:-}
 if [ -n "${FM_TEST_FAIL_PUBLIC_PATH:-}" ] \
    && [ "$destination" = "$FM_TEST_FAIL_PUBLIC_PATH" ] \
    && [ ! -e "${FM_TEST_FAIL_MARKER:?}" ]; then
-  : > "$FM_TEST_FAIL_MARKER"
+  grep '^herdr_pane_id=' "$candidate" 2>/dev/null | cut -d= -f2- > "$FM_TEST_FAIL_MARKER" || : > "$FM_TEST_FAIL_MARKER"
   exit 92
+fi
+if [ -n "${FM_TEST_UNSAFE_FINAL_PATH:-}" ] \
+   && [ "$destination" = "$FM_TEST_UNSAFE_FINAL_PATH" ] \
+   && [ ! -e "${FM_TEST_UNSAFE_FINAL_MARKER:?}" ]; then
+  grep '^herdr_pane_id=' "$candidate" 2>/dev/null | cut -d= -f2- > "$FM_TEST_UNSAFE_FINAL_MARKER" \
+    || : > "$FM_TEST_UNSAFE_FINAL_MARKER"
+  /bin/rm -f "$candidate" "$destination"
+  /bin/mkdir "$destination"
+  exit 0
 fi
 exec /bin/mv "$@"
 SH
@@ -331,13 +340,14 @@ track_task_tmp() {  # <task-id>
   TASK_TMP_PATHS="${TASK_TMP_PATHS}/tmp/fm-$1"$'\n'
 }
 
-run_real_worker_spawn() {  # <id> <home> <project> <worktree> <fakebin> <state> <log>
-  local id=$1 home=$2 project=$3 worktree=$4 fake=$5 state=$6 log=$7
+run_real_worker_spawn() {  # <id> <home> <project> <worktree> <fakebin> <state> <log> [fail-path] [fail-marker]
+  local id=$1 home=$2 project=$3 worktree=$4 fake=$5 state=$6 log=$7 fail_path=${8:-} fail_marker=${9:-}
   track_task_tmp "$id"
   PATH="$fake:$BASE_PATH" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HERDR_SESSION=fmtest \
     FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" \
-    FM_FAKE_HERDR_WORKTREE="$worktree" \
+    FM_FAKE_HERDR_WORKTREE="$worktree" FM_TEST_FAIL_PUBLIC_PATH="$fail_path" \
+    FM_TEST_FAIL_MARKER="$fail_marker" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" "sh -c 'true'" --backend herdr
 }
 
@@ -706,6 +716,62 @@ test_v2_v3_flat_fallback_uses_exact_parent() {
   pass "Herdr spawn recovery: v2/v3 fallback uses only the exact journal parent"
 }
 
+# A real flat ship spawn keeps the shared session lock and exact response pane
+# through task publication. An honest rename failure rolls back only that pane,
+# launches no agent, leaves no live orphan, and permits the same id to retry.
+test_real_flat_publication_failure_cleanup_retry() {
+  local mode dir home project worktree id fake state log public marker before_meta
+  local out status start calls failed_pane new_pane
+  for mode in absent existing; do
+    dir="$TMP_ROOT/full-flat-publication-$mode"
+    home="$dir/home"; project="$dir/payments"; worktree="$dir/worktree"
+    id="flat-publication-$mode-$$"
+    make_project_and_worktree "$project" "$worktree" \
+      || fail "could not create $mode flat-publication project fixture"
+    make_worker_home "$home" "$id"
+    fake=$(make_stateful_herdr "$dir")
+    state="$dir/state.json"; log="$dir/herdr.log"
+    public="$home/state/$id.meta"; marker="$dir/rename-failed"
+    before_meta="$dir/meta.before"
+    if [ "$mode" = existing ]; then
+      run_real_worker_spawn "$id" "$home" "$project" "$worktree" "$fake" "$state" "$log" \
+        > "$dir/seed.out" 2> "$dir/seed.err" \
+        || fail "could not seed existing flat metadata: $(cat "$dir/seed.err")"
+      cp "$public" "$before_meta"
+    fi
+    start=$(wc -l < "$log" | tr -d '[:space:]')
+    out=$(run_real_worker_spawn "$id" "$home" "$project" "$worktree" "$fake" "$state" "$log" \
+      "$public" "$marker" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "$mode flat metadata rename failure reported spawn success"
+    [ -s "$marker" ] || fail "$mode flat fault did not reach task metadata publication"
+    failed_pane=$(cat "$marker")
+    calls=$(sed -n "$((start + 1)),\$p" "$log")
+    assert_contains "$calls" "pane"$'\037'"close"$'\037'"$failed_pane" \
+      "$mode flat publication failure did not close its response-derived pane"
+    assert_not_contains "$calls" $'pane\037send-text' \
+      "$mode flat publication failure launched an agent"
+    jq -e --arg label "$id · worker" \
+      '([.panes[] | select(.label == $label)] | length) == 0' "$state" >/dev/null \
+      || fail "$mode flat publication failure left a live task pane"
+    if [ "$mode" = absent ]; then
+      [ ! -e "$public" ] && [ ! -L "$public" ] \
+        || fail "absent flat publication failure created public metadata"
+    else
+      cmp -s "$before_meta" "$public" \
+        || fail "honest existing flat rename failure changed prior metadata"
+    fi
+    run_real_worker_spawn "$id" "$home" "$project" "$worktree" "$fake" "$state" "$log" \
+      > "$dir/retry.out" 2> "$dir/retry.err" \
+      || fail "$mode flat same-id retry failed: $(cat "$dir/retry.err")"
+    new_pane=$(grep '^herdr_pane_id=' "$public" | cut -d= -f2-)
+    [ -n "$new_pane" ] || fail "$mode flat retry omitted its published pane id"
+    jq -e --arg pane "$new_pane" --arg label "$id · worker" '
+      ([.panes[] | select(.pane_id == $pane and .label == $label)] | length) == 1
+    ' "$state" >/dev/null || fail "$mode flat retry did not leave one published task pane"
+  done
+  pass "Herdr full spawn: flat metadata publication failure rolls back its exact pane and same-id retry succeeds"
+}
+
 make_secondmate_home() {  # <home> <id>
   mkdir -p "$1/bin" "$1/state" "$1/config" "$1/data" "$1/projects"
   printf '%s\n' "$2" > "$1/.fm-secondmate-home"
@@ -713,13 +779,15 @@ make_secondmate_home() {  # <home> <id>
   printf 'Safe second-mate spawn fixture.\n' > "$1/data/charter.md"
 }
 
-run_real_secondmate_spawn() {  # <id> <primary-home> <child-home> <fakebin> <state> <log> [fail-path] [fail-marker]
+run_real_secondmate_spawn() {  # <id> <primary-home> <child-home> <fakebin> <state> <log> [fail-path] [fail-marker] [unsafe-final-path] [unsafe-final-marker]
   local id=$1 primary=$2 child=$3 fake=$4 state=$5 log=$6 fail_path=${7:-} fail_marker=${8:-}
+  local unsafe_final_path=${9:-} unsafe_final_marker=${10:-}
   track_task_tmp "$id"
   PATH="$fake:$BASE_PATH" FM_GATE_REFUSE_BYPASS=1 FM_SPAWN_NO_GUARD=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$primary" HERDR_SESSION=fmtest \
     FM_FAKE_HERDR_STATE="$state" FM_HERDR_LOG="$log" FM_FAKE_HERDR_WORKTREE="$child" \
     FM_TEST_FAIL_PUBLIC_PATH="$fail_path" FM_TEST_FAIL_MARKER="$fail_marker" \
+    FM_TEST_UNSAFE_FINAL_PATH="$unsafe_final_path" FM_TEST_UNSAFE_FINAL_MARKER="$unsafe_final_marker" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$child" "sh -c 'true'" --secondmate --backend herdr
 }
 
@@ -782,6 +850,52 @@ test_real_secondmate_publication_crash_retry() {
     and ([.panes[] | select(.pane_id == $new)] | length) == 1
   ' "$SM_STATE" >/dev/null || fail "second-mate retry did not leave exactly the replacement pane"
   pass "Herdr full spawn: real second-mate parent-first publication fault recovers one exact husk"
+}
+
+# Fault the real child-home publisher into an unsafe final path after task-pane
+# creation. The adapter must close only the response pane, launch nothing, and
+# allow the same id after the unsafe path is removed.
+test_real_secondmate_unsafe_parent_publication_retry() {
+  local dir id primary child fake state log parent public marker out status calls failed_pane new_pane
+  dir="$TMP_ROOT/full-secondmate-unsafe-parent"
+  id="sm-unsafe-parent-$$"
+  primary="$dir/primary-home"; child="$dir/child-home"
+  mkdir -p "$primary/state" "$primary/config" "$primary/data"
+  make_secondmate_home "$child" "$id"
+  child=$(cd "$child" && pwd -P)
+  fake=$(make_stateful_herdr "$dir")
+  state="$dir/state.json"; log="$dir/herdr.log"
+  parent="$child/state/.herdr-parent.meta"
+  public="$primary/state/$id.meta"
+  marker="$dir/unsafe-final"
+  out=$(run_real_secondmate_spawn "$id" "$primary" "$child" "$fake" "$state" "$log" \
+    '' '' "$parent" "$marker" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "unsafe parent publication reported second-mate spawn success"
+  [ -s "$marker" ] || fail "unsafe parent fixture did not reach the real parent rename"
+  failed_pane=$(cat "$marker")
+  [ -d "$parent" ] && [ ! -L "$parent" ] \
+    || fail "unsafe parent fixture did not leave its injected final directory"
+  [ ! -e "$public" ] && [ ! -L "$public" ] \
+    || fail "unsafe parent publication created primary task metadata"
+  calls=$(cat "$log")
+  assert_contains "$calls" "pane"$'\037'"close"$'\037'"$failed_pane" \
+    "unsafe parent publication did not roll back its response-derived pane"
+  assert_not_contains "$calls" $'pane\037send-text' \
+    "unsafe parent publication launched an agent"
+  jq -e --arg label "$id · second mate" \
+    '([.panes[] | select(.label == $label)] | length) == 0' "$state" >/dev/null \
+    || fail "unsafe parent publication left a live second-mate task pane"
+  rmdir "$parent"
+  run_real_secondmate_spawn "$id" "$primary" "$child" "$fake" "$state" "$log" \
+    > "$dir/retry.out" 2> "$dir/retry.err" \
+    || fail "unsafe parent same-id retry failed: $(cat "$dir/retry.err")"
+  [ -f "$parent" ] && [ ! -L "$parent" ] && [ -f "$public" ] \
+    || fail "unsafe parent retry did not publish both regular records"
+  new_pane=$(grep '^herdr_pane_id=' "$public" | cut -d= -f2-)
+  jq -e --arg pane "$new_pane" --arg label "$id · second mate" '
+    ([.panes[] | select(.pane_id == $pane and .label == $label)] | length) == 1
+  ' "$state" >/dev/null || fail "unsafe parent retry did not leave its one published pane"
+  pass "Herdr full spawn: unsafe parent publication rolls back its exact pane and same-id retry succeeds"
 }
 
 # Recreate the same real parent-first fault, then disconfirm recovery rights for
@@ -1054,7 +1168,7 @@ test_flat_retry_evidence_classification() {
 # Keep the two evidence channels and publication order explicit in the real
 # spawn owner. These assertions supplement the behavioral adapter fixtures.
 test_spawn_wiring_keeps_recovery_channels_separate() {
-  local source
+  local source guide verification
   source=$(cat "$ROOT/bin/fm-spawn.sh")
   assert_contains "$source" 'herdr_projection_prepare_flat_evidence' \
     "spawn has no projected-versus-flat evidence classifier"
@@ -1064,13 +1178,32 @@ test_spawn_wiring_keeps_recovery_channels_separate() {
     "spawn does not pass parent recovery separately from task metadata"
   assert_contains "$source" 'spawn_herdr_secondmate_publications_match' \
     "spawn does not compare parent and primary tuples before launch"
+  guide=$(cat "$ROOT/docs/herdr-backend.md")
+  verification=$(cat "$ROOT/docs/verification/runtime-backends.md")
+  # shellcheck disable=SC2016  # Literal maintained Markdown, not shell expansion.
+  assert_not_contains "$guide" 'The normal `fm-<id>` task tab' \
+    "Herdr guide restored the stale normal-task label"
+  assert_not_contains "$guide" 'The per-home workspace is reused' \
+    "Herdr guide restored stale primary-project per-home wording"
+  assert_not_contains "$guide" 'cross-home version 2 binding,' \
+    "Herdr guide restored version-2-only cross-home refusal wording"
+  assert_contains "$guide" 'The ordinary readable-role task tab' \
+    "Herdr guide omitted the current ordinary task-label wording"
+  assert_contains "$verification" \
+    'ok - Herdr metadata: complete-schema atomic publication refuses unsafe and unverifiable public paths' \
+    "runtime verification does not quote the current publisher test output"
+  assert_not_contains "$verification" \
+    'ok - Herdr metadata: concurrent visibility is complete-record-or-old across validation and rename failures' \
+    "runtime verification restored output that no current test emits"
   pass "Herdr spawn recovery: flat, task, and parent evidence channels remain separate"
 }
 
 test_real_spawn_keeps_native_primary_and_firstmate_project_distinct
 test_real_spawn_projection_fallback_and_reclaim_refusals
 test_real_spawn_exact_journal_parent_refusals
+test_real_flat_publication_failure_cleanup_retry
 test_real_secondmate_publication_crash_retry
+test_real_secondmate_unsafe_parent_publication_retry
 test_real_secondmate_parent_recovery_disconfirming_cases
 test_v1_flat_fallback_excludes_projected_child
 test_v2_v3_flat_fallback_uses_exact_parent
