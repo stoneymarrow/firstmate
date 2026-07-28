@@ -1056,16 +1056,64 @@ fm_backend_herdr_metadata_validate_home() {  # <state-directory>
   done
 }
 
+# Validate the complete 15-field parent record against the marked child home,
+# exact producer inputs, canonical path relationships, derived readable labels,
+# fixed session alias, and mode-0600 regular-file boundary.
+fm_backend_herdr_parent_metadata_validate_publish() {  # <record> <task-id> <home> <session> <workspace> <tab> <pane> <workspace-label> <task-label>
+  local meta=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7 workspace_label=$8 task_label=$9
+  local lines mode field actual expected_home fm_home_identity subject expected_workspace expected_task
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$meta") || return 1
+  [ "$mode" = 600 ] || return 1
+  lines=$(wc -l < "$meta" 2>/dev/null | tr -d '[:space:]')
+  [ "$lines" = 15 ] || return 1
+  fm_backend_herdr_metadata_validate_record "$meta" || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" backend)" = herdr ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" kind)" = secondmate ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" task_id)" = "$id" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_session)" = "$session" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_session_display_label)" \
+    = "$FM_BACKEND_HERDR_SESSION_DISPLAY_LABEL" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_workspace_id)" = "$workspace" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_tab_id)" = "$tab" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_pane_id)" = "$pane" ] || return 1
+  expected_home=$(fm_backend_herdr_project_identity "$home") || return 1
+  fm_home_identity=$(fm_backend_herdr_project_identity "$FM_HOME") || return 1
+  [ "$fm_home_identity" = "$expected_home" ] || return 1
+  for field in project home worktree; do
+    actual=$(fm_backend_herdr_meta_field_exact "$meta" "$field") || return 1
+    actual=$(fm_backend_herdr_project_identity "$actual") || return 1
+    [ "$actual" = "$expected_home" ] || return 1
+  done
+  subject=$(fm_backend_herdr_secondmate_subject) || return 1
+  [ "$subject" = "$id" ] || return 1
+  expected_workspace=$(fm_backend_herdr_workspace_label "$home") || return 1
+  expected_task=$(fm_backend_herdr_task_label "$id" secondmate) || return 1
+  [ "$workspace_label" = "$expected_workspace" ] && [ "$task_label" = "$expected_task" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" display_label)" = "$expected_task" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_workspace_label)" = "$expected_workspace" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_tab_label)" = "$expected_task" ] || return 1
+  [ "$(fm_backend_herdr_meta_field_exact "$meta" herdr_pane_label)" = "$expected_task" ]
+}
+
 # Persist the exact parent tuple inside a marked home so its first child can
 # corroborate the stable workspace without adopting it by label. The writer
-# creates a mode-0600 same-directory private file, validates the complete Herdr
-# record and fixed session alias, then renames it over the exact child-home path.
+# accepts only an absent or regular non-symlink destination, creates and fully
+# validates one mode-0600 same-directory candidate, renames it, then verifies
+# the final regular record and candidate checksum. Validation and an ordinary
+# failing system rename leave an absent destination or prior file unchanged.
+# A substituted rename program can change public bytes before lying about
+# success; post-rename verification refuses that result but cannot roll it back.
 # Caller-owned recovery validation remains separate and cannot turn this record
 # into generic task or projection authority.
 fm_backend_herdr_parent_metadata_write() {  # <path> <task-id> <home> <session> <workspace> <tab> <pane> <workspace-label> <task-label>
-  local path=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7 workspace_label=$8 task_label=$9 tmp
+  local path=$1 id=$2 home=$3 session=$4 workspace=$5 tab=$6 pane=$7 workspace_label=$8 task_label=$9
+  local tmp candidate_sum public_sum
   [ "$path" = "$FM_HOME/state/.herdr-parent.meta" ] || return 1
   [ -d "$FM_HOME/state" ] && [ ! -L "$FM_HOME/state" ] || return 1
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  fi
   tmp=$(mktemp "$FM_HOME/state/.herdr-parent.meta.XXXXXX") || return 1
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   if ! printf '%s\n' \
@@ -1077,8 +1125,20 @@ fm_backend_herdr_parent_metadata_write() {  # <path> <task-id> <home> <session> 
     rm -f "$tmp"
     return 1
   fi
-  fm_backend_herdr_metadata_validate_record "$tmp" || { rm -f "$tmp"; return 1; }
+  fm_backend_herdr_parent_metadata_validate_publish "$tmp" "$id" "$home" "$session" \
+    "$workspace" "$tab" "$pane" "$workspace_label" "$task_label" \
+    || { rm -f "$tmp"; return 1; }
+  candidate_sum=$(cksum < "$tmp") || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+  if [ -e "$tmp" ] || [ -L "$tmp" ]; then
+    rm -f "$tmp"
+    return 1
+  fi
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  fm_backend_herdr_parent_metadata_validate_publish "$path" "$id" "$home" "$session" \
+    "$workspace" "$tab" "$pane" "$workspace_label" "$task_label" || return 1
+  public_sum=$(cksum < "$path") || return 1
+  [ "$public_sum" = "$candidate_sum" ]
 }
 
 # Validate the one child-home parent record that may recover a second-mate

@@ -128,10 +128,11 @@ PROJ=$(grep '^project=' "$META" | cut -d= -f2-)
 BACKEND=$(fm_backend_of_meta "$META")
 HERDR_ROLE_TRANSITION_INTENT="$STATE/$ID.herdr-role-transition"
 HERDR_ROLE_TRANSITION_VALIDATED=0
-if [ "$BACKEND" = herdr ]; then
+HERDR_BACKEND_CLAIM_COUNT=$(grep -c '^backend=herdr$' "$META" 2>/dev/null || true)
+if [ "$HERDR_BACKEND_CLAIM_COUNT" -gt 0 ]; then
   fm_backend_source herdr || exit 1
   fm_backend_herdr_metadata_validate_record "$META" || exit 1
-  [ "$(grep -c '^backend=herdr$' "$META" 2>/dev/null || true)" = 1 ] \
+  [ "$HERDR_BACKEND_CLAIM_COUNT" = 1 ] \
     && [ "$(grep -c '^backend=' "$META" 2>/dev/null || true)" = 1 ] || {
     echo "REFUSED: task $ID has a malformed Herdr backend claim." >&2
     exit 1
